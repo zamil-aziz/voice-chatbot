@@ -3,10 +3,13 @@ Voice Pipeline Manager.
 Orchestrates the full STT → LLM → TTS flow.
 """
 
+import json
 import time
 import threading
 import numpy as np
-from typing import Optional, Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Callable, Dict
 
 from rich.console import Console
 from rich.live import Live
@@ -15,6 +18,7 @@ from rich.text import Text
 
 from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector
 from ..models import SpeechToText, LanguageModel, TextToSpeech
+from config.settings import settings
 
 console = Console()
 
@@ -89,10 +93,28 @@ class VoicePipeline:
         self.capture = AudioCapture(sample_rate=16000)
         self.player = AudioPlayer(sample_rate=24000)
         self.vad = VoiceActivityDetector(
-            threshold=0.5,
-            min_speech_duration_ms=250,
-            min_silence_duration_ms=700,  # Slightly longer for natural pauses
+            threshold=settings.vad.threshold,
+            min_speech_duration_ms=settings.vad.min_speech_duration_ms,
+            min_silence_duration_ms=settings.vad.min_silence_duration_ms,
         )
+
+    def _log_turn(self, user_text: str, assistant_response: str, timing: Dict[str, float]) -> None:
+        """Log a conversation turn to file if logging is enabled."""
+        if not settings.logging.enabled or not settings.logging.log_conversations:
+            return
+
+        log_dir = Path(settings.logging.log_dir)
+        log_dir.mkdir(exist_ok=True)
+
+        log_file = log_dir / f"conversation_{datetime.now().strftime('%Y%m%d')}.jsonl"
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user": user_text,
+            "assistant": assistant_response,
+            "timing": timing,
+        }
+        with open(log_file, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def process_utterance(self, audio: np.ndarray) -> None:
         """
@@ -124,22 +146,31 @@ class VoicePipeline:
 
             console.print(f"[bold green]Assistant:[/bold green] {response}")
 
-            # Step 3: Synthesize speech
+            # Step 3: Synthesize and stream speech (lower latency)
             console.print("[cyan]Speaking...[/cyan]")
             start = time.time()
-            audio_out, sr = self.tts.synthesize(response)
-            tts_time = time.time() - start
 
-            # Step 4: Play audio (can be interrupted)
-            self.player.play_async(audio_out, sr)
+            # Use streaming TTS - audio starts playing before full synthesis
+            self.player.start_streaming()
+            for graphemes, phonemes, audio_chunk in self.tts.synthesize_stream(response):
+                if self._stop_event.is_set():  # Check for shutdown
+                    break
+                self.player.queue_audio(audio_chunk, self.tts.sample_rate)
+            self.player.stop_streaming()
+
+            tts_time = time.time() - start
 
             # Log timing
             total_time = stt_time + llm_time + tts_time
+            timing = {"stt": stt_time, "llm": llm_time, "tts": tts_time, "total": total_time}
             console.print(
                 f"[dim]Timing: STT={stt_time:.2f}s, "
                 f"LLM={llm_time:.2f}s, TTS={tts_time:.2f}s, "
                 f"Total={total_time:.2f}s[/dim]"
             )
+
+            # Log conversation turn if enabled
+            self._log_turn(text, response, timing)
 
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
@@ -179,7 +210,7 @@ class VoicePipeline:
                 # Check for barge-in (user interrupting)
                 if self.player.is_playing:
                     prob = self.vad.get_speech_probability(chunk)
-                    if prob > 0.6:  # User is speaking
+                    if prob > settings.vad.threshold:  # User is speaking
                         console.print("[yellow]Interrupted![/yellow]")
                         self.player.stop()
                         self.vad.reset()

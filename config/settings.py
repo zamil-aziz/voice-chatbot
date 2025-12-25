@@ -47,6 +47,13 @@ class TTSSettings(BaseModel):
     speed: float = 1.0
 
 
+class LoggingSettings(BaseModel):
+    """Conversation logging settings."""
+    enabled: bool = False
+    log_dir: str = "logs"
+    log_conversations: bool = True
+
+
 class Settings(BaseModel):
     """Main settings container."""
     audio: AudioSettings = Field(default_factory=AudioSettings)
@@ -54,6 +61,10 @@ class Settings(BaseModel):
     stt: STTSettings = Field(default_factory=STTSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+
+    # Model loading settings
+    model_load_timeout: int = 300  # 5 minutes timeout for model downloads
 
     # Debug settings
     debug: bool = False

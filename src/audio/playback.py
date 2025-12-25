@@ -99,6 +99,7 @@ class AudioPlayer:
         """Start background streaming playback."""
         self._stop_flag.clear()
         self._audio_queue = queue.Queue()
+        self.is_playing = True  # Mark as playing immediately for barge-in detection
 
         def stream_worker():
             import sounddevice as sd

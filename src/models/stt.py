@@ -4,11 +4,14 @@ Optimized for Apple Silicon.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Optional
 import numpy as np
 
 from rich.console import Console
+
+from config.settings import settings
 
 console = Console()
 
@@ -27,17 +30,25 @@ class SpeechToText:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model. Downloads if not cached."""
+        """Load Whisper model with timeout. Downloads if not cached."""
         console.print(f"[yellow]Loading Whisper model: {self.model_name}[/yellow]")
         start = time.time()
 
-        try:
+        def do_load():
             import mlx_whisper
+            return mlx_whisper
 
-            # Model will be downloaded on first use
-            self.model = mlx_whisper
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(do_load)
+                self.model = future.result(timeout=settings.model_load_timeout)
+
             console.print(
                 f"[green]Whisper model ready in {time.time() - start:.2f}s[/green]"
+            )
+        except FuturesTimeoutError:
+            raise RuntimeError(
+                f"Whisper model loading timed out after {settings.model_load_timeout}s"
             )
         except ImportError as e:
             console.print(f"[red]Failed to import mlx_whisper: {e}[/red]")

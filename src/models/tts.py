@@ -4,10 +4,13 @@ Produces realistic, natural-sounding speech.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
 import numpy as np
 
 from rich.console import Console
+
+from config.settings import settings
 
 console = Console()
 
@@ -46,20 +49,27 @@ class TextToSpeech:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Kokoro TTS model."""
+        """Load Kokoro TTS model with timeout."""
         console.print(f"[yellow]Loading TTS model (voice: {self.voice})[/yellow]")
         start = time.time()
 
-        try:
+        def do_load():
             from kokoro import KPipeline
-
-            # Initialize Kokoro pipeline
             # 'a' = American English, 'b' = British English
             lang_code = self.voice[0]  # 'a' or 'b'
-            self.pipeline = KPipeline(lang_code=lang_code)
+            return KPipeline(lang_code=lang_code)
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(do_load)
+                self.pipeline = future.result(timeout=settings.model_load_timeout)
 
             console.print(
                 f"[green]TTS ready in {time.time() - start:.2f}s[/green]"
+            )
+        except FuturesTimeoutError:
+            raise RuntimeError(
+                f"TTS model loading timed out after {settings.model_load_timeout}s"
             )
         except ImportError as e:
             console.print(f"[red]Failed to import kokoro: {e}[/red]")

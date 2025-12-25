@@ -4,9 +4,12 @@ Optimized for Apple Silicon with streaming support.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Generator, Optional, List, Dict
 
 from rich.console import Console
+
+from config.settings import settings
 
 console = Console()
 
@@ -39,18 +42,28 @@ Aim for 1-3 sentences unless more detail is specifically requested.
 Be natural and warm in your tone."""
 
     def _load_model(self) -> None:
-        """Load LLM model. Downloads if not cached."""
+        """Load LLM model with timeout. Downloads if not cached."""
         console.print(f"[yellow]Loading LLM: {self.model_name}[/yellow]")
         start = time.time()
 
-        try:
+        def do_load():
             from mlx_lm import load, generate
+            model, tokenizer = load(self.model_name)
+            return model, tokenizer, generate
 
-            self.model, self.tokenizer = load(self.model_name)
-            self._generate_fn = generate
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(do_load)
+                self.model, self.tokenizer, self._generate_fn = future.result(
+                    timeout=settings.model_load_timeout
+                )
 
             console.print(
                 f"[green]LLM ready in {time.time() - start:.2f}s[/green]"
+            )
+        except FuturesTimeoutError:
+            raise RuntimeError(
+                f"LLM model loading timed out after {settings.model_load_timeout}s"
             )
         except ImportError as e:
             console.print(f"[red]Failed to import mlx_lm: {e}[/red]")

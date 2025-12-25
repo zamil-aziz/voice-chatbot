@@ -139,17 +139,17 @@ class AudioPlayer:
         self._audio_queue.put((audio, sr))
 
     def stop_streaming(self) -> None:
-        """Stop streaming playback."""
-        self._stop_flag.set()
-        self._audio_queue.put((None, None))  # Sentinel
+        """Stop streaming playback after draining the queue."""
+        # Send sentinel to signal end of stream (worker will finish current queue)
+        self._audio_queue.put((None, None))
 
+        # Wait for thread to finish playing all queued audio
         if self._playback_thread:
-            self._playback_thread.join(timeout=1.0)
+            self._playback_thread.join(timeout=30.0)  # Allow time for audio to play
             self._playback_thread = None
 
-        import sounddevice as sd
-
-        sd.stop()
+        # Only now set flags - audio has finished naturally
+        self._stop_flag.set()
         self.is_playing = False
 
     def wait(self) -> None:

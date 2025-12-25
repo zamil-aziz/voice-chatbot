@@ -89,6 +89,8 @@ class SpeechToText:
             path_or_hf_repo=self.model_name,
             language=self.language,
             fp16=True,  # Use FP16 for faster inference on M-series
+            condition_on_previous_text=False,  # Prevents hallucination on short phrases
+            initial_prompt="",  # Prevents biased transcription
         )
 
         text = result.get("text", "").strip()

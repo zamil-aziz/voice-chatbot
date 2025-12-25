@@ -18,22 +18,40 @@ console = Console()
 class TextToSpeech:
     """Kokoro-based text-to-speech synthesis."""
 
-    # Available Kokoro voices
+    # Available Kokoro English voices (28 total, sorted by quality grade)
     VOICES = {
-        # American Female
-        "af_bella": "American Female - Bella (warm, friendly)",
-        "af_sarah": "American Female - Sarah (clear, professional)",
-        "af_nicole": "American Female - Nicole (soft, calm)",
-        "af_sky": "American Female - Sky (young, energetic)",
-        # American Male
-        "am_adam": "American Male - Adam (deep, confident)",
-        "am_michael": "American Male - Michael (friendly, casual)",
-        # British Female
-        "bf_emma": "British Female - Emma (elegant, refined)",
-        "bf_isabella": "British Female - Isabella (warm, articulate)",
-        # British Male
-        "bm_george": "British Male - George (distinguished, clear)",
-        "bm_lewis": "British Male - Lewis (friendly, approachable)",
+        # American Female (11 voices)
+        "af_heart": "American Female - Heart [A]",
+        "af_bella": "American Female - Bella (warm, friendly) [A-]",
+        "af_nicole": "American Female - Nicole (soft, calm) [B-]",
+        "af_aoede": "American Female - Aoede [C+]",
+        "af_kore": "American Female - Kore [C+]",
+        "af_sarah": "American Female - Sarah (clear, professional) [C+]",
+        "af_nova": "American Female - Nova [C]",
+        "af_alloy": "American Female - Alloy [C]",
+        "af_sky": "American Female - Sky (young, energetic) [C-]",
+        "af_jessica": "American Female - Jessica [D]",
+        "af_river": "American Female - River [D]",
+        # American Male (9 voices)
+        "am_fenrir": "American Male - Fenrir [C+]",
+        "am_michael": "American Male - Michael (friendly, casual) [C+]",
+        "am_puck": "American Male - Puck [C+]",
+        "am_echo": "American Male - Echo [D]",
+        "am_eric": "American Male - Eric [D]",
+        "am_liam": "American Male - Liam [D]",
+        "am_onyx": "American Male - Onyx [D]",
+        "am_santa": "American Male - Santa [D-]",
+        "am_adam": "American Male - Adam (deep, confident) [F+]",
+        # British Female (4 voices)
+        "bf_emma": "British Female - Emma (elegant, refined) [B-]",
+        "bf_isabella": "British Female - Isabella (warm, articulate) [C]",
+        "bf_alice": "British Female - Alice [D]",
+        "bf_lily": "British Female - Lily [D]",
+        # British Male (4 voices)
+        "bm_george": "British Male - George (distinguished, clear) [C]",
+        "bm_fable": "British Male - Fable [C]",
+        "bm_lewis": "British Male - Lewis (friendly, approachable) [D+]",
+        "bm_daniel": "British Male - Daniel [D]",
     }
 
     def __init__(

@@ -1,0 +1,21 @@
+# MLX - Apple Silicon optimized ML framework
+mlx>=0.21.0
+mlx-lm>=0.20.0
+
+# Whisper for Speech-to-Text
+mlx-whisper>=0.4.0
+
+# Audio processing
+sounddevice>=0.5.0
+numpy>=1.26.0
+scipy>=1.14.0
+
+# Voice Activity Detection
+silero-vad>=5.1
+
+# TTS - Kokoro (realistic voices)
+kokoro>=0.3.0
+
+# Utilities
+rich>=13.9.0  # Pretty console output
+pydantic>=2.9.0  # Config validation

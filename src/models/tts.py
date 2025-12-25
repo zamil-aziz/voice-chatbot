@@ -1,0 +1,179 @@
+"""
+Text-to-Speech module using Kokoro.
+Produces realistic, natural-sounding speech.
+"""
+
+import time
+from typing import Optional
+import numpy as np
+
+from rich.console import Console
+
+console = Console()
+
+
+class TextToSpeech:
+    """Kokoro-based text-to-speech synthesis."""
+
+    # Available Kokoro voices
+    VOICES = {
+        # American Female
+        "af_bella": "American Female - Bella (warm, friendly)",
+        "af_sarah": "American Female - Sarah (clear, professional)",
+        "af_nicole": "American Female - Nicole (soft, calm)",
+        "af_sky": "American Female - Sky (young, energetic)",
+        # American Male
+        "am_adam": "American Male - Adam (deep, confident)",
+        "am_michael": "American Male - Michael (friendly, casual)",
+        # British Female
+        "bf_emma": "British Female - Emma (elegant, refined)",
+        "bf_isabella": "British Female - Isabella (warm, articulate)",
+        # British Male
+        "bm_george": "British Male - George (distinguished, clear)",
+        "bm_lewis": "British Male - Lewis (friendly, approachable)",
+    }
+
+    def __init__(
+        self,
+        voice: str = "af_bella",
+        speed: float = 1.0,
+        sample_rate: int = 24000,
+    ):
+        self.voice = voice
+        self.speed = speed
+        self.sample_rate = sample_rate
+        self.pipeline = None
+        self._load_model()
+
+    def _load_model(self) -> None:
+        """Load Kokoro TTS model."""
+        console.print(f"[yellow]Loading TTS model (voice: {self.voice})[/yellow]")
+        start = time.time()
+
+        try:
+            from kokoro import KPipeline
+
+            # Initialize Kokoro pipeline
+            # 'a' = American English, 'b' = British English
+            lang_code = self.voice[0]  # 'a' or 'b'
+            self.pipeline = KPipeline(lang_code=lang_code)
+
+            console.print(
+                f"[green]TTS ready in {time.time() - start:.2f}s[/green]"
+            )
+        except ImportError as e:
+            console.print(f"[red]Failed to import kokoro: {e}[/red]")
+            console.print("[yellow]Run: pip install kokoro[/yellow]")
+            raise
+
+    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        """
+        Synthesize speech from text.
+
+        Args:
+            text: Text to synthesize
+
+        Returns:
+            Tuple of (audio samples as float32 numpy array, sample rate)
+        """
+        if self.pipeline is None:
+            raise RuntimeError("Model not loaded")
+
+        start = time.time()
+
+        # Generate audio
+        generator = self.pipeline(
+            text,
+            voice=self.voice,
+            speed=self.speed,
+        )
+
+        # Collect all audio chunks
+        audio_chunks = []
+        for _, _, audio_chunk in generator:
+            audio_chunks.append(audio_chunk)
+
+        # Concatenate all chunks
+        if audio_chunks:
+            audio = np.concatenate(audio_chunks)
+        else:
+            audio = np.array([], dtype=np.float32)
+
+        elapsed = time.time() - start
+        duration = len(audio) / self.sample_rate if len(audio) > 0 else 0
+
+        console.print(
+            f"[dim]TTS ({elapsed:.2f}s): {duration:.2f}s audio for "
+            f"{len(text)} chars[/dim]"
+        )
+
+        return audio, self.sample_rate
+
+    def synthesize_stream(self, text: str):
+        """
+        Synthesize speech with streaming output.
+
+        Args:
+            text: Text to synthesize
+
+        Yields:
+            Tuples of (graphemes, phonemes, audio_chunk)
+        """
+        if self.pipeline is None:
+            raise RuntimeError("Model not loaded")
+
+        for graphemes, phonemes, audio_chunk in self.pipeline(
+            text,
+            voice=self.voice,
+            speed=self.speed,
+        ):
+            yield graphemes, phonemes, audio_chunk
+
+    def list_voices(self) -> dict[str, str]:
+        """List available voices with descriptions."""
+        return self.VOICES
+
+    def set_voice(self, voice: str) -> None:
+        """
+        Change the voice.
+
+        Args:
+            voice: Voice identifier (e.g., 'af_bella')
+        """
+        if voice not in self.VOICES:
+            available = ", ".join(self.VOICES.keys())
+            raise ValueError(f"Unknown voice: {voice}. Available: {available}")
+
+        # Check if we need to reload (language changed)
+        old_lang = self.voice[0]
+        new_lang = voice[0]
+
+        self.voice = voice
+
+        if old_lang != new_lang:
+            console.print(f"[yellow]Switching language, reloading model...[/yellow]")
+            self._load_model()
+
+
+# Quick test
+if __name__ == "__main__":
+    import sounddevice as sd
+
+    tts = TextToSpeech(voice="af_bella")
+
+    # List voices
+    console.print("[bold]Available voices:[/bold]")
+    for voice_id, description in tts.list_voices().items():
+        console.print(f"  {voice_id}: {description}")
+
+    # Synthesize and play
+    text = "Hello! I'm your AI voice assistant. How can I help you today?"
+    console.print(f"\n[bold]Synthesizing:[/bold] {text}")
+
+    audio, sr = tts.synthesize(text)
+
+    console.print(f"[green]Playing audio ({len(audio) / sr:.2f}s)...[/green]")
+    sd.play(audio, sr)
+    sd.wait()
+
+    console.print("[green]Done![/green]")

@@ -38,7 +38,7 @@ class TextToSpeech:
 
     def __init__(
         self,
-        voice: str = "af_bella",
+        voice: str = "bf_emma",
         speed: float = 1.0,
         sample_rate: int = 24000,
     ):

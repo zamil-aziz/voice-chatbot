@@ -16,11 +16,11 @@ console = Console()
 
 
 class LanguageModel:
-    """Llama-based language model using MLX."""
+    """Language model using MLX (supports Qwen, Llama, etc.)."""
 
     def __init__(
         self,
-        model_name: str = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+        model_name: str = "mlx-community/Qwen2.5-7B-Instruct-4bit",
         max_tokens: int = 256,
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
@@ -49,7 +49,7 @@ Be natural and warm in your tone."""
 
         def do_load():
             from mlx_lm import load, generate
-            model, tokenizer = load(self.model_name)
+            model, tokenizer = load(self.model_name, tokenizer_config={"eos_token": "<|im_end|>"})
             return model, tokenizer, generate
 
         try:
@@ -72,12 +72,12 @@ Be natural and warm in your tone."""
             raise
 
     def _format_messages(self, user_message: str) -> str:
-        """Format messages for Llama 3.1 Instruct format."""
+        """Format messages using the model's chat template."""
         messages = [{"role": "system", "content": self.system_prompt}]
         messages.extend(self.conversation_history)
         messages.append({"role": "user", "content": user_message})
 
-        # Apply Llama 3.1 chat template
+        # Apply chat template
         return self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,

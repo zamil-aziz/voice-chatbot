@@ -33,7 +33,7 @@ class STTSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     """Language Model settings."""
-    model_name: str = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+    model_name: str = "mlx-community/Qwen2.5-7B-Instruct-4bit"
     max_tokens: int = 256
     temperature: float = 0.7
     system_prompt: str = """You are a helpful, friendly voice assistant.

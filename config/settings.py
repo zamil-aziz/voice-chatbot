@@ -26,7 +26,7 @@ class VADSettings(BaseModel):
 
 class STTSettings(BaseModel):
     """Speech-to-Text (Whisper) settings."""
-    model_name: str = "mlx-community/whisper-large-v3-mlx"
+    model_name: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "en"
     task: Literal["transcribe", "translate"] = "transcribe"
 

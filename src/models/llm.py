@@ -10,6 +10,7 @@ from typing import Generator, Optional, List, Dict
 from rich.console import Console
 
 from config.settings import settings
+from mlx_lm.sample_utils import make_sampler
 
 console = Console()
 
@@ -102,12 +103,13 @@ Be natural and warm in your tone."""
         prompt = self._format_messages(user_message)
 
         # Generate response
+        sampler = make_sampler(temp=self.temperature)
         response = self._generate_fn(
             self.model,
             self.tokenizer,
             prompt=prompt,
             max_tokens=self.max_tokens,
-            temp=self.temperature,
+            sampler=sampler,
             verbose=False,
         )
 
@@ -148,15 +150,18 @@ Be natural and warm in your tone."""
         prompt = self._format_messages(user_message)
 
         full_response = ""
-        for chunk in stream_generate(
+        sampler = make_sampler(temp=self.temperature)
+        for response in stream_generate(
             self.model,
             self.tokenizer,
             prompt=prompt,
             max_tokens=self.max_tokens,
-            temp=self.temperature,
+            sampler=sampler,
         ):
-            full_response += chunk
-            yield chunk
+            # stream_generate yields response objects with .text attribute
+            text = response.text if hasattr(response, 'text') else str(response)
+            full_response += text
+            yield text
 
         # Update conversation history
         self.conversation_history.append({"role": "user", "content": user_message})

@@ -1,6 +1,6 @@
 # MLX - Apple Silicon optimized ML framework
 mlx>=0.21.0
-mlx-lm>=0.20.0
+mlx-lm>=0.21.0
 
 # Whisper for Speech-to-Text
 mlx-whisper>=0.4.0
@@ -14,7 +14,7 @@ scipy>=1.14.0
 silero-vad>=5.1
 
 # TTS - Kokoro (realistic voices)
-kokoro>=0.3.0
+kokoro>=0.9.4
 
 # Utilities
 rich>=13.9.0  # Pretty console output

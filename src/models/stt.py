@@ -21,7 +21,7 @@ class SpeechToText:
 
     def __init__(
         self,
-        model_name: str = "mlx-community/whisper-large-v3-mlx",
+        model_name: str = "mlx-community/whisper-large-v3-turbo",
         language: str = "en",
     ):
         self.model_name = model_name

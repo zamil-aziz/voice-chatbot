@@ -98,9 +98,14 @@ class TextToSpeech:
             speed=self.speed,
         )
 
-        # Collect all audio chunks
+        # Collect all audio chunks (convert tensors to numpy)
         audio_chunks = []
         for _, _, audio_chunk in generator:
+            # Kokoro returns tensors, convert to numpy
+            if hasattr(audio_chunk, 'numpy'):
+                audio_chunk = audio_chunk.numpy()
+            elif hasattr(audio_chunk, '__array__'):
+                audio_chunk = np.asarray(audio_chunk)
             audio_chunks.append(audio_chunk)
 
         # Concatenate all chunks
@@ -137,6 +142,11 @@ class TextToSpeech:
             voice=self.voice,
             speed=self.speed,
         ):
+            # Convert tensor to numpy if needed
+            if hasattr(audio_chunk, 'numpy'):
+                audio_chunk = audio_chunk.numpy()
+            elif hasattr(audio_chunk, '__array__'):
+                audio_chunk = np.asarray(audio_chunk)
             yield graphemes, phonemes, audio_chunk
 
     def list_voices(self) -> dict[str, str]:

@@ -207,14 +207,10 @@ class VoicePipeline:
 
                 timestamp_ms += chunk_duration_ms
 
-                # Check for barge-in (user interrupting)
+                # Skip processing while audio is playing (barge-in disabled)
+                # Note: Barge-in was causing false interruptions when using speakers
+                # (microphone picking up TTS audio). Re-enable if using headphones.
                 if self.player.is_playing:
-                    prob = self.vad.get_speech_probability(chunk)
-                    if prob > settings.vad.threshold:  # User is speaking
-                        console.print("[yellow]Interrupted![/yellow]")
-                        self.player.stop()
-                        self.vad.reset()
-                        self.capture.clear_queue()
                     continue
 
                 # Process VAD

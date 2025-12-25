@@ -5,6 +5,7 @@ Audio capture module for real-time microphone input.
 import numpy as np
 import threading
 import queue
+from collections import deque
 from typing import Callable, Optional
 
 from rich.console import Console
@@ -45,6 +46,11 @@ class AudioCapture:
         self.is_running = False
         self.audio_queue: queue.Queue = queue.Queue()
 
+        # Pre-buffer to capture audio before speech detection (500ms worth)
+        # This ensures we don't lose the beginning of utterances while VAD confirms speech
+        pre_buffer_chunks = int((sample_rate * 0.5) / chunk_size) + 1  # ~500ms of chunks
+        self.pre_buffer: deque = deque(maxlen=pre_buffer_chunks)
+
         # Accumulated audio for recording
         self.recording = False
         self.recorded_chunks: list = []
@@ -68,6 +74,9 @@ class AudioCapture:
             # Get mono audio as float32
             audio = indata[:, 0].copy().astype(np.float32)
             self.audio_queue.put(audio)
+
+            # Always keep recent audio in pre-buffer (for capturing speech start)
+            self.pre_buffer.append(audio.copy())
 
             # Store if recording
             if self.recording:
@@ -115,8 +124,10 @@ class AudioCapture:
             return None
 
     def start_recording(self) -> None:
-        """Start accumulating audio for later use."""
-        self.recorded_chunks = []
+        """Start accumulating audio, including pre-buffer for speech already spoken."""
+        # Include pre-buffered audio from before speech detection was confirmed
+        # This captures the beginning of the utterance that would otherwise be lost
+        self.recorded_chunks = list(self.pre_buffer)
         self.recording = True
 
     def stop_recording(self) -> np.ndarray:

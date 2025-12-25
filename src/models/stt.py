@@ -6,7 +6,7 @@ Optimized for Apple Silicon.
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
 
 from rich.console import Console
@@ -27,7 +27,10 @@ class SpeechToText:
         self.model_name = model_name
         self.language = language
         self.model = None
+        self.vad_model = None
+        self.get_speech_timestamps = None
         self._load_model()
+        self._load_vad()
 
     def _load_model(self) -> None:
         """Load Whisper model with timeout. Downloads if not cached."""
@@ -54,6 +57,71 @@ class SpeechToText:
             console.print(f"[red]Failed to import mlx_whisper: {e}[/red]")
             console.print("[yellow]Run: pip install mlx-whisper[/yellow]")
             raise
+
+    def _load_vad(self) -> None:
+        """Load Silero VAD model for silence trimming."""
+        try:
+            import torch
+
+            self.vad_model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                force_reload=False,
+                onnx=False,
+            )
+            self.get_speech_timestamps = utils[0]
+            console.print("[green]VAD model loaded for silence trimming[/green]")
+        except Exception as e:
+            console.print(f"[yellow]VAD for trimming not available: {e}[/yellow]")
+            self.vad_model = None
+
+    def _trim_silence(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+        """Trim silence from audio using VAD."""
+        if self.vad_model is None or self.get_speech_timestamps is None:
+            return audio
+
+        import torch
+
+        audio_tensor = torch.from_numpy(audio)
+        speech_timestamps = self.get_speech_timestamps(
+            audio_tensor, self.vad_model, sampling_rate=sample_rate
+        )
+
+        if not speech_timestamps:
+            return audio  # Return original if no speech detected
+
+        # Extract from first speech start to last speech end
+        start = speech_timestamps[0]["start"]
+        end = speech_timestamps[-1]["end"]
+
+        # Add small padding (50ms) to avoid cutting off speech edges
+        padding = int(sample_rate * 0.05)
+        start = max(0, start - padding)
+        end = min(len(audio), end + padding)
+
+        trimmed = audio[start:end]
+        console.print(
+            f"[dim]Trimmed audio: {len(audio)/sample_rate:.2f}s -> {len(trimmed)/sample_rate:.2f}s[/dim]"
+        )
+        return trimmed
+
+    def _is_hallucination(self, text: str) -> bool:
+        """Detect common hallucination patterns like repetition loops."""
+        words = text.lower().split()
+        if len(words) < 5:
+            return False
+
+        # Check if same word repeated many times (>50% of text)
+        word_counts = {}
+        for word in words:
+            word_counts[word] = word_counts.get(word, 0) + 1
+
+        max_repeat = max(word_counts.values())
+        if max_repeat > len(words) * 0.5:
+            console.print(f"[yellow]Hallucination detected (repetition)[/yellow]")
+            return True
+
+        return False
 
     def transcribe(
         self,
@@ -83,6 +151,13 @@ class SpeechToText:
         if np.abs(audio).max() > 1.0:
             audio = audio / np.abs(audio).max()
 
+        # Trim silence using VAD to prevent hallucinations
+        audio = self._trim_silence(audio, sample_rate)
+
+        if len(audio) < sample_rate * 0.1:  # Less than 100ms of audio
+            console.print("[dim]Audio too short, skipping[/dim]")
+            return ""
+
         # Transcribe using mlx_whisper
         result = self.model.transcribe(
             audio,
@@ -90,11 +165,17 @@ class SpeechToText:
             language=self.language,
             fp16=True,  # Use FP16 for faster inference on M-series
             condition_on_previous_text=False,  # Prevents hallucination on short phrases
-            initial_prompt="",  # Prevents biased transcription
+            compression_ratio_threshold=2.4,  # Detect repetition loops
+            no_speech_threshold=0.6,  # Better silence detection
         )
 
         text = result.get("text", "").strip()
         elapsed = time.time() - start
+
+        # Check for hallucination patterns
+        if self._is_hallucination(text):
+            console.print(f"[dim]STT ({elapsed:.2f}s): [rejected hallucination][/dim]")
+            return ""
 
         console.print(f"[dim]STT ({elapsed:.2f}s): {text}[/dim]")
 

@@ -12,6 +12,7 @@ import numpy as np
 from rich.console import Console
 
 from config.settings import settings
+from ..audio.vad_singleton import get_vad_model
 
 console = Console()
 
@@ -59,21 +60,13 @@ class SpeechToText:
             raise
 
     def _load_vad(self) -> None:
-        """Load Silero VAD model for silence trimming."""
+        """Load shared Silero VAD model for silence trimming."""
         try:
-            import torch
-
-            self.vad_model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                force_reload=False,
-                onnx=False,
-            )
-            self.get_speech_timestamps = utils[0]
-            console.print("[green]VAD model loaded for silence trimming[/green]")
+            self.vad_model, self.get_speech_timestamps = get_vad_model()
         except Exception as e:
             console.print(f"[yellow]VAD for trimming not available: {e}[/yellow]")
             self.vad_model = None
+            self.get_speech_timestamps = None
 
     def _trim_silence(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """Trim silence from audio using VAD."""

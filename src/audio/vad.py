@@ -9,6 +9,8 @@ from collections import deque
 
 from rich.console import Console
 
+from .vad_singleton import get_vad_model
+
 console = Console()
 
 
@@ -52,37 +54,8 @@ class VoiceActivityDetector:
         # Probability history for smoothing
         self.prob_history = deque(maxlen=10)
 
-        self.model = None
-        self._load_model()
-
-    def _load_model(self) -> None:
-        """Load Silero VAD model."""
-        console.print("[yellow]Loading Silero VAD model...[/yellow]")
-
-        try:
-            import torch
-
-            # Load Silero VAD
-            self.model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                force_reload=False,
-                onnx=False,
-            )
-
-            # Get utility functions
-            (
-                self.get_speech_timestamps,
-                self.save_audio,
-                self.read_audio,
-                self.VADIterator,
-                self.collect_chunks,
-            ) = utils
-
-            console.print("[green]VAD model ready[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to load Silero VAD: {e}[/red]")
-            raise
+        # Use shared VAD model singleton
+        self.model, self.get_speech_timestamps = get_vad_model()
 
     def get_speech_probability(self, audio_chunk: np.ndarray) -> float:
         """

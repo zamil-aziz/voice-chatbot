@@ -116,9 +116,16 @@ class VoicePipeline:
         with open(log_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
+    def _synthesize_sentence(self, sentence: str) -> None:
+        """Synthesize and queue a single sentence for playback."""
+        for _, _, audio_chunk in self.tts.synthesize_stream(sentence):
+            if self._stop_event.is_set():
+                break
+            self.player.queue_audio(audio_chunk, self.tts.sample_rate)
+
     def process_utterance(self, audio: np.ndarray) -> None:
         """
-        Process a complete user utterance.
+        Process a complete user utterance with streaming LLM→TTS.
 
         Args:
             audio: User's speech audio
@@ -138,35 +145,74 @@ class VoicePipeline:
 
             console.print(f"[bold white]You:[/bold white] {text}")
 
-            # Step 2: Generate response
+            # Step 2 & 3: Stream LLM → TTS (overlapped for lower latency)
             console.print("[cyan]Thinking...[/cyan]")
-            start = time.time()
-            response = self.llm.generate(text)
-            llm_time = time.time() - start
+            llm_start = time.time()
+            tts_start = None
+            first_audio_time = None
 
-            console.print(f"[bold green]Assistant:[/bold green] {response}")
-
-            # Step 3: Synthesize and stream speech (lower latency)
-            console.print("[cyan]Speaking...[/cyan]")
-            start = time.time()
-
-            # Use streaming TTS - audio starts playing before full synthesis
+            # Start audio streaming
             self.player.start_streaming()
-            for graphemes, phonemes, audio_chunk in self.tts.synthesize_stream(response):
-                if self._stop_event.is_set():  # Check for shutdown
+
+            # Buffer for accumulating LLM tokens until sentence boundary
+            sentence_buffer = ""
+            full_response = ""
+            sentence_endings = ('.', '!', '?')
+
+            for token in self.llm.generate_stream(text):
+                if self._stop_event.is_set():
                     break
-                self.player.queue_audio(audio_chunk, self.tts.sample_rate)
+
+                full_response += token
+                sentence_buffer += token
+
+                # Check for sentence boundary
+                # Look for sentence ending followed by space or end of token
+                if any(sentence_buffer.rstrip().endswith(end) for end in sentence_endings):
+                    sentence = sentence_buffer.strip()
+                    if sentence:
+                        # First sentence: record time to first audio
+                        if tts_start is None:
+                            tts_start = time.time()
+                            llm_time = tts_start - llm_start
+                            console.print(f"[dim]LLM first sentence: {llm_time:.2f}s[/dim]")
+
+                        # Synthesize this sentence immediately
+                        self._synthesize_sentence(sentence)
+
+                        if first_audio_time is None:
+                            first_audio_time = time.time() - llm_start
+
+                    sentence_buffer = ""
+
+            # Handle any remaining text (incomplete sentence)
+            if sentence_buffer.strip():
+                if tts_start is None:
+                    tts_start = time.time()
+                    llm_time = tts_start - llm_start
+                self._synthesize_sentence(sentence_buffer.strip())
+
             self.player.stop_streaming()
 
-            tts_time = time.time() - start
+            # Calculate timing
+            total_end = time.time()
+            if tts_start is None:
+                tts_start = llm_start
+                llm_time = 0
+            tts_time = total_end - tts_start
+
+            response = full_response.strip()
+            console.print(f"[bold green]Assistant:[/bold green] {response}")
 
             # Log timing
-            total_time = stt_time + llm_time + tts_time
+            total_time = stt_time + (total_end - llm_start)
             timing = {"stt": stt_time, "llm": llm_time, "tts": tts_time, "total": total_time}
             console.print(
                 f"[dim]Timing: STT={stt_time:.2f}s, "
                 f"LLM={llm_time:.2f}s, TTS={tts_time:.2f}s, "
-                f"Total={total_time:.2f}s[/dim]"
+                f"Total={total_time:.2f}s"
+                + (f", First audio={first_audio_time:.2f}s" if first_audio_time else "")
+                + "[/dim]"
             )
 
             # Log conversation turn if enabled
@@ -174,6 +220,8 @@ class VoicePipeline:
 
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
         finally:
             self.is_processing = False
 

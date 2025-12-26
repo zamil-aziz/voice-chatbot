@@ -72,10 +72,14 @@ class TextToSpeech:
         start = time.time()
 
         def do_load():
+            import torch
             from kokoro import KPipeline
             # 'a' = American English, 'b' = British English
             lang_code = self.voice[0]  # 'a' or 'b'
-            return KPipeline(lang_code=lang_code)
+            # Use MPS (Metal) for GPU acceleration on Apple Silicon
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            console.print(f"[dim]TTS using device: {device}[/dim]")
+            return KPipeline(lang_code=lang_code, device=device)
 
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:

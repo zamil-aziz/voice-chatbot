@@ -44,7 +44,8 @@ class AudioCapture:
 
         self.stream = None
         self.is_running = False
-        self.audio_queue: queue.Queue = queue.Queue()
+        # Max queue size: ~3 seconds of audio at typical chunk sizes
+        self.audio_queue: queue.Queue = queue.Queue(maxsize=100)
 
         # Pre-buffer to capture audio before speech detection (500ms worth)
         # This ensures we don't lose the beginning of utterances while VAD confirms speech
@@ -71,14 +72,19 @@ class AudioCapture:
             if status:
                 console.print(f"[red]Audio status: {status}[/red]")
 
-            # Get mono audio as float32
-            audio = indata[:, 0].copy().astype(np.float32)
-            self.audio_queue.put(audio)
+            # Get mono audio as float32 (single copy, reuse for all destinations)
+            audio = indata[:, 0].astype(np.float32)
+
+            # Queue for processing (non-blocking to avoid audio glitches)
+            try:
+                self.audio_queue.put_nowait(audio)
+            except queue.Full:
+                pass  # Drop chunk if queue full (consumer too slow)
 
             # Always keep recent audio in pre-buffer (for capturing speech start)
-            self.pre_buffer.append(audio.copy())
+            self.pre_buffer.append(audio)
 
-            # Store if recording
+            # Store if recording (need copy here since we're accumulating)
             if self.recording:
                 self.recorded_chunks.append(audio.copy())
 

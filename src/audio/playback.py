@@ -19,6 +19,9 @@ class AudioPlayer:
     Supports both blocking playback and background streaming.
     """
 
+    # Max audio chunks in queue (~2 seconds of audio at typical chunk sizes)
+    MAX_QUEUE_SIZE = 50
+
     def __init__(
         self,
         sample_rate: int = 24000,  # Kokoro outputs 24kHz
@@ -34,10 +37,23 @@ class AudioPlayer:
         self.sample_rate = sample_rate
         self.device = device
 
-        self.is_playing = False
+        self._is_playing = False
+        self._playing_lock = threading.Lock()
         self._stop_flag = threading.Event()
         self._playback_thread: Optional[threading.Thread] = None
-        self._audio_queue: queue.Queue = queue.Queue()
+        self._audio_queue: queue.Queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
+
+    @property
+    def is_playing(self) -> bool:
+        """Thread-safe getter for is_playing flag."""
+        with self._playing_lock:
+            return self._is_playing
+
+    @is_playing.setter
+    def is_playing(self, value: bool) -> None:
+        """Thread-safe setter for is_playing flag."""
+        with self._playing_lock:
+            self._is_playing = value
 
     def play(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> None:
         """
@@ -98,7 +114,7 @@ class AudioPlayer:
     def start_streaming(self) -> None:
         """Start background streaming playback."""
         self._stop_flag.clear()
-        self._audio_queue = queue.Queue()
+        self._audio_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self.is_playing = True  # Mark as playing immediately for barge-in detection
 
         def stream_worker():
@@ -123,20 +139,28 @@ class AudioPlayer:
 
     def queue_audio(
         self, audio: np.ndarray, sample_rate: Optional[int] = None
-    ) -> None:
+    ) -> bool:
         """
         Queue audio for streaming playback.
 
         Args:
             audio: Audio samples
             sample_rate: Sample rate
+
+        Returns:
+            True if queued successfully, False if queue is full
         """
         sr = sample_rate or self.sample_rate
 
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
 
-        self._audio_queue.put((audio, sr))
+        try:
+            self._audio_queue.put((audio, sr), timeout=1.0)
+            return True
+        except queue.Full:
+            console.print("[yellow]Audio queue full, dropping chunk[/yellow]")
+            return False
 
     def stop_streaming(self) -> None:
         """Stop streaming playback after draining the queue."""

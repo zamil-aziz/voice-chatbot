@@ -6,6 +6,7 @@ Orchestrates the full STT → LLM → TTS flow.
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -65,33 +66,67 @@ class VoicePipeline:
 
         # State
         self.is_running = False
-        self.is_processing = False
+        self._is_processing = False
+        self._processing_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._active_threads: list = []
+
+    @property
+    def is_processing(self) -> bool:
+        """Thread-safe getter for is_processing flag."""
+        with self._processing_lock:
+            return self._is_processing
+
+    @is_processing.setter
+    def is_processing(self, value: bool) -> None:
+        """Thread-safe setter for is_processing flag."""
+        with self._processing_lock:
+            self._is_processing = value
 
     def _load_models(self) -> None:
-        """Load all models if not already loaded."""
+        """Load all models in parallel if not already loaded."""
         if self._models_loaded:
             return
 
-        console.print("\n[bold yellow]Loading AI models...[/bold yellow]")
+        console.print("\n[bold yellow]Loading AI models in parallel...[/bold yellow]")
         console.print("(This may take a moment on first run)\n")
 
-        if self.stt is None:
-            self.stt = SpeechToText()
+        start_time = time.time()
 
-        if self.llm is None:
-            self.llm = LanguageModel(
-                model_name=settings.llm.model_name,
-                max_tokens=settings.llm.max_tokens,
-                temperature=settings.llm.temperature,
-                system_prompt=settings.llm.system_prompt,
-            )
+        def load_stt():
+            if self.stt is None:
+                self.stt = SpeechToText()
+            return "STT"
 
-        if self.tts is None:
-            self.tts = TextToSpeech()
+        def load_llm():
+            if self.llm is None:
+                self.llm = LanguageModel(
+                    model_name=settings.llm.model_name,
+                    max_tokens=settings.llm.max_tokens,
+                    temperature=settings.llm.temperature,
+                    system_prompt=settings.llm.system_prompt,
+                )
+            return "LLM"
+
+        def load_tts():
+            if self.tts is None:
+                self.tts = TextToSpeech()
+            return "TTS"
+
+        # Load all models in parallel
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [
+                executor.submit(load_stt),
+                executor.submit(load_llm),
+                executor.submit(load_tts),
+            ]
+            for future in as_completed(futures):
+                model_name = future.result()
+                console.print(f"[green]✓ {model_name} loaded[/green]")
 
         self._models_loaded = True
-        console.print("\n[bold green]All models loaded![/bold green]")
+        total_time = time.time() - start_time
+        console.print(f"\n[bold green]All models loaded in {total_time:.1f}s![/bold green]")
 
     def _init_audio(self) -> None:
         """Initialize audio components."""
@@ -160,21 +195,22 @@ class VoicePipeline:
             self.player.start_streaming()
 
             # Buffer for accumulating LLM tokens until sentence boundary
-            sentence_buffer = ""
-            full_response = ""
+            # Using lists for efficient accumulation (avoids string concat overhead)
+            sentence_tokens: list = []
+            response_tokens: list = []
             sentence_endings = ('.', '!', '?')
 
             for token in self.llm.generate_stream(text):
                 if self._stop_event.is_set():
                     break
 
-                full_response += token
-                sentence_buffer += token
+                response_tokens.append(token)
+                sentence_tokens.append(token)
 
-                # Check for sentence boundary
-                # Look for sentence ending followed by space or end of token
-                if any(sentence_buffer.rstrip().endswith(end) for end in sentence_endings):
-                    sentence = sentence_buffer.strip()
+                # Check for sentence boundary (check token directly, not full buffer)
+                token_stripped = token.rstrip()
+                if token_stripped and token_stripped[-1] in sentence_endings:
+                    sentence = ''.join(sentence_tokens).strip()
                     if sentence:
                         # First sentence: record time to first audio
                         if tts_start is None:
@@ -188,14 +224,17 @@ class VoicePipeline:
                         if first_audio_time is None:
                             first_audio_time = time.time() - llm_start
 
-                    sentence_buffer = ""
+                    sentence_tokens = []
 
             # Handle any remaining text (incomplete sentence)
-            if sentence_buffer.strip():
+            remaining = ''.join(sentence_tokens).strip()
+            if remaining:
                 if tts_start is None:
                     tts_start = time.time()
                     llm_time = tts_start - llm_start
-                self._synthesize_sentence(sentence_buffer.strip())
+                self._synthesize_sentence(remaining)
+
+            full_response = ''.join(response_tokens)
 
             self.player.stop_streaming()
 
@@ -277,12 +316,17 @@ class VoicePipeline:
                 if speech_ended and not self.is_processing:
                     audio = self.capture.stop_recording()
                     if len(audio) > 0:
+                        # Clean up finished threads
+                        self._active_threads = [t for t in self._active_threads if t.is_alive()]
+
                         # Process in background to keep capturing
-                        threading.Thread(
+                        thread = threading.Thread(
                             target=self.process_utterance,
                             args=(audio,),
                             daemon=True,
-                        ).start()
+                        )
+                        self._active_threads.append(thread)
+                        thread.start()
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Stopping...[/yellow]")
@@ -293,6 +337,12 @@ class VoicePipeline:
         """Stop the voice pipeline."""
         self._stop_event.set()
         self.is_running = False
+
+        # Wait for active processing threads to finish (with timeout)
+        for thread in self._active_threads:
+            if thread.is_alive():
+                thread.join(timeout=2.0)
+        self._active_threads.clear()
 
         if self.capture:
             self.capture.stop()

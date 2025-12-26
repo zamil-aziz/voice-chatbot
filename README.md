@@ -7,16 +7,29 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 - **100% Local**: All processing happens on your device
 - **100% Free**: No API costs, no subscriptions
 - **Privacy First**: Your conversations never leave your machine
-- **Natural Voice**: High-quality text-to-speech with Kokoro
+- **Natural Voice**: 28 high-quality voices with Kokoro TTS
 - **Fast**: Optimized for Apple Silicon with MLX
+- **Streaming Pipeline**: TTS starts before LLM finishes for lower latency
+- **Barge-in Support**: Interrupt the assistant while it's speaking
+- **GPU Accelerated**: MPS (Metal) acceleration for TTS
+
+## Architecture
+
+```
+┌─────┐    ┌─────┐    ┌─────┐    ┌─────┐    ┌─────┐    ┌─────────┐
+│ Mic │ -> │ VAD │ -> │ STT │ -> │ LLM │ -> │ TTS │ -> │ Speaker │
+└─────┘    └─────┘    └─────┘    └──┬──┘    └──┬──┘    └─────────┘
+                                    │          │
+                              [streaming: TTS starts per-sentence]
+```
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|------------|
-| Speech-to-Text | Whisper Large-v3 (via MLX) |
-| Language Model | Llama 3.1 8B 4-bit (via MLX) |
-| Text-to-Speech | Kokoro |
+| Speech-to-Text | Whisper Large-v3-turbo (via MLX) |
+| Language Model | Qwen 2.5 7B 4-bit (via MLX) |
+| Text-to-Speech | Kokoro (28 voices) |
 | Voice Detection | Silero VAD |
 
 ## Requirements
@@ -28,8 +41,9 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 ## Installation
 
 ```bash
-# Clone or navigate to the project
-cd ~/Personal/voice-chatbot
+# Clone the repository
+git clone <your-repo-url>
+cd voice-chatbot
 
 # Create virtual environment
 python3 -m venv venv
@@ -48,20 +62,11 @@ python -m src.main
 
 ### Test Individual Components
 ```bash
-# Test speech-to-text
-python -m src.main --test-stt
-
-# Test language model
-python -m src.main --test-llm
-
-# Test text-to-speech
-python -m src.main --test-tts
-
-# Test voice activity detection
-python -m src.main --test-vad
-
-# Test all components
-python -m src.main --test-all
+python -m src.main --test-stt   # Test speech-to-text
+python -m src.main --test-llm   # Test language model
+python -m src.main --test-tts   # Test text-to-speech
+python -m src.main --test-vad   # Test voice activity detection
+python -m src.main --test-all   # Test all components
 ```
 
 ## Project Structure
@@ -69,46 +74,83 @@ python -m src.main --test-all
 ```
 voice-chatbot/
 ├── src/
-│   ├── audio/           # Audio capture and playback
-│   │   ├── capture.py   # Microphone input
-│   │   ├── playback.py  # Speaker output
-│   │   └── vad.py       # Voice activity detection
-│   ├── models/          # ML model wrappers
-│   │   ├── stt.py       # Whisper wrapper
-│   │   ├── llm.py       # Llama wrapper
-│   │   └── tts.py       # Kokoro wrapper
-│   ├── pipeline/        # Orchestration
-│   │   └── manager.py   # Main pipeline controller
-│   └── main.py          # Entry point
+│   ├── audio/              # Audio capture and playback
+│   │   ├── capture.py      # Microphone input (16kHz)
+│   │   ├── playback.py     # Speaker output (24kHz)
+│   │   ├── vad.py          # Voice activity detection
+│   │   └── vad_singleton.py # Shared VAD model instance
+│   ├── models/             # ML model wrappers
+│   │   ├── stt.py          # Whisper wrapper
+│   │   ├── llm.py          # Qwen/LLM wrapper
+│   │   └── tts.py          # Kokoro wrapper
+│   ├── pipeline/           # Orchestration
+│   │   └── manager.py      # Main pipeline controller
+│   └── main.py             # Entry point
 ├── config/
-│   └── settings.py      # Configuration
+│   └── settings.py         # Configuration
 ├── requirements.txt
 └── README.md
 ```
 
 ## Configuration
 
-Edit `config/settings.py` to customize:
+Edit `config/settings.py` to customize behavior. Key settings:
 
-- Audio settings (sample rate, chunk size)
-- VAD sensitivity (speech detection threshold)
-- LLM parameters (temperature, max tokens)
-- TTS voice selection
-- System prompt for the assistant
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Audio | `sample_rate` | 16000 | Capture rate (Hz) |
+| VAD | `threshold` | 0.5 | Speech detection sensitivity |
+| VAD | `min_silence_duration_ms` | 500 | Silence to end turn |
+| LLM | `max_tokens` | 256 | Max response length |
+| LLM | `temperature` | 0.7 | Response creativity |
+| TTS | `voice` | `af_bella` | Default voice |
+| TTS | `speed` | 1.0 | Speech rate multiplier |
 
 ## Available Voices
 
-Kokoro provides multiple high-quality voices:
+Kokoro provides 28 English voices with quality ratings:
 
-**American English:**
-- `af_bella` - Warm, friendly female
-- `af_sarah` - Clear, professional female
-- `am_adam` - Deep, confident male
-- `am_michael` - Friendly, casual male
+**American Female (11 voices)**
+| Voice | Grade | Description |
+|-------|-------|-------------|
+| `af_heart` | A | Highest quality, natural |
+| `af_bella` | A- | Warm, friendly (default) |
+| `af_nicole` | B- | Soft, calm |
+| `af_sarah` | C+ | Clear, professional |
+| `af_aoede` `af_kore` `af_nova` `af_alloy` `af_sky` `af_jessica` `af_river` | C-D | Additional options |
 
-**British English:**
-- `bf_emma` - Elegant, refined female
-- `bm_george` - Distinguished, clear male
+**American Male (9 voices)**
+| Voice | Grade | Description |
+|-------|-------|-------------|
+| `am_fenrir` | C+ | Strong, clear |
+| `am_michael` | C+ | Friendly, casual |
+| `am_puck` | C+ | Energetic |
+| `am_adam` | F+ | Deep, confident |
+| `am_echo` `am_eric` `am_liam` `am_onyx` `am_santa` | C-D | Additional options |
+
+**British Female (4 voices)**
+| Voice | Grade | Description |
+|-------|-------|-------------|
+| `bf_emma` | B- | Elegant, refined |
+| `bf_isabella` | C | Professional |
+| `bf_alice` `bf_lily` | C-D | Additional options |
+
+**British Male (4 voices)**
+| Voice | Grade | Description |
+|-------|-------|-------------|
+| `bm_george` | C | Distinguished, clear |
+| `bm_fable` | C | Storyteller |
+| `bm_lewis` | D+ | Friendly |
+| `bm_daniel` | D | Casual |
+
+## Performance
+
+| Metric | Typical Value |
+|--------|---------------|
+| First audio output | ~2-3 seconds after speaking |
+| Memory usage | 8-12 GB RAM |
+| Disk space (models) | ~15 GB |
+| Models load time | ~30-60 seconds (first run downloads) |
 
 ## Troubleshooting
 
@@ -127,4 +169,4 @@ Models are downloaded automatically on first run. Ensure you have ~15GB free dis
 
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE) for details.

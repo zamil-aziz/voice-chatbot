@@ -80,7 +80,12 @@ class VoicePipeline:
             self.stt = SpeechToText()
 
         if self.llm is None:
-            self.llm = LanguageModel()
+            self.llm = LanguageModel(
+                model_name=settings.llm.model_name,
+                max_tokens=settings.llm.max_tokens,
+                temperature=settings.llm.temperature,
+                system_prompt=settings.llm.system_prompt,
+            )
 
         if self.tts is None:
             self.tts = TextToSpeech()

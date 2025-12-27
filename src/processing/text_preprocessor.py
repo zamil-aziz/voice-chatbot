@@ -9,18 +9,35 @@ from typing import Optional
 
 from config.settings import TextProcessingSettings
 
+# Emoji pattern for stripping emojis before TTS
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F1E0-\U0001F1FF"  # flags
+    "\U00002702-\U000027B0"  # dingbats
+    "\U0001F900-\U0001F9FF"  # supplemental symbols
+    "\U0001FA00-\U0001FA6F"  # chess symbols
+    "\U0001FA70-\U0001FAFF"  # symbols
+    "\U00002600-\U000026FF"  # misc symbols
+    "]+",
+    flags=re.UNICODE
+)
+
 
 # Interjection expansions to fix rushed/sped-up pronunciation in Kokoro TTS
 # These short words get unnaturally short durations without expansion
+# Pre-compiled for performance (these run on every TTS call)
 INTERJECTION_EXPANSIONS = [
-    (r'\bOh\b', 'Ohhh'),
-    (r'\bHmm\b', 'Hmmm'),  # Expand for natural duration
-    (r'\bAh\b', 'Ahhh'),
-    (r'\bUh\b', 'Uhhh'),
-    (r'\bWow\b', 'Woww'),
-    (r'\bHuh\b', 'Huhh'),
-    (r'\bOoh\b', 'Oooh'),
-    (r'\bAww\b', 'Awww'),
+    (re.compile(r'\bOh\b', re.IGNORECASE), 'Ohhh'),
+    (re.compile(r'\bHmm+\b\.?\.?\.?\s*', re.IGNORECASE), ''),  # Remove Hmm entirely - Kokoro can't pronounce it
+    (re.compile(r'\bAw+\b,?\s*', re.IGNORECASE), ''),  # Remove Aw entirely - sounds weird in TTS
+    (re.compile(r'\bAh\b', re.IGNORECASE), 'Ahhh'),
+    (re.compile(r'\bUh\b', re.IGNORECASE), 'Uhhh'),
+    (re.compile(r'\bWow\b', re.IGNORECASE), 'Woww'),
+    (re.compile(r'\bHuh\b', re.IGNORECASE), 'Huhh'),
+    (re.compile(r'\bOoh\b', re.IGNORECASE), 'Oooh'),
 ]
 
 # Abbreviation expansions for natural TTS pronunciation
@@ -95,6 +112,9 @@ class TextPreprocessor:
         Returns:
             Preprocessed text with prosody cues
         """
+        # Strip emojis first - TTS will read them aloud otherwise
+        text = EMOJI_PATTERN.sub('', text)
+
         # Interjection expansion runs independently of 'enabled' flag
         # because it's a TTS bug workaround, not an optional feature
         if self.config.expand_interjections:
@@ -140,18 +160,19 @@ class TextPreprocessor:
         def preserve_case(match, replacement):
             """Preserve the case of the original match."""
             original = match.group(0)
+            if not replacement:  # Empty replacement (removing the match)
+                return ''
             if original.isupper():
                 return replacement.upper()
             elif original[0].isupper():
                 return replacement.capitalize()
             return replacement.lower()
 
-        for pattern, replacement in INTERJECTION_EXPANSIONS:
-            text = re.sub(
-                pattern,
-                lambda m: preserve_case(m, replacement),
-                text,
-                flags=re.IGNORECASE
+        # Use pre-compiled patterns from INTERJECTION_EXPANSIONS
+        for compiled_pattern, replacement in INTERJECTION_EXPANSIONS:
+            text = compiled_pattern.sub(
+                lambda m, r=replacement: preserve_case(m, r),
+                text
             )
         return text
 

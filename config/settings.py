@@ -20,7 +20,7 @@ class VADSettings(BaseModel):
     """Voice Activity Detection settings."""
     threshold: float = 0.5  # Speech probability threshold
     min_speech_duration_ms: int = 250  # Minimum speech duration
-    min_silence_duration_ms: int = 500  # Silence before end-of-turn
+    min_silence_duration_ms: int = 300  # Silence before end-of-turn (reduced from 500ms for faster response)
     window_size_samples: int = 512  # Silero VAD window size
 
 

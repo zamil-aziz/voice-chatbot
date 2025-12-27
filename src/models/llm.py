@@ -34,6 +34,7 @@ class LanguageModel:
         self.model = None
         self.tokenizer = None
         self.conversation_history: List[Dict[str, str]] = []
+        self._sampler = None  # Cached sampler instance
 
         self._load_model()
 
@@ -59,6 +60,9 @@ Be natural and warm in your tone."""
                 self.model, self.tokenizer, self._generate_fn = future.result(
                     timeout=settings.model_load_timeout
                 )
+
+            # Create cached sampler instance
+            self._sampler = make_sampler(temp=self.temperature)
 
             console.print(
                 f"[green]LLM ready in {time.time() - start:.2f}s[/green]"
@@ -106,10 +110,10 @@ Be natural and warm in your tone."""
         # Inject RAG context if provided
         if context:
             context_text = "\n".join(context)
-            user_message = f"""[Background context - use only if relevant to what the user is asking:
+            user_message = f"""[You know these things about the person you're talking to:
 {context_text}
 
-IMPORTANT: This is just reference info. Don't bring up this information unless the user asks about it. Don't assume who is speaking.]
+Use this naturally in conversation - reference what you know to make them feel understood and known, but don't force it.]
 
 User: {user_message}"""
 
@@ -118,14 +122,13 @@ User: {user_message}"""
         # Format the prompt
         prompt = self._format_messages(user_message)
 
-        # Generate response
-        sampler = make_sampler(temp=self.temperature)
+        # Generate response using cached sampler
         response = self._generate_fn(
             self.model,
             self.tokenizer,
             prompt=prompt,
             max_tokens=self.max_tokens,
-            sampler=sampler,
+            sampler=self._sampler,
             verbose=False,
         )
 
@@ -165,30 +168,49 @@ User: {user_message}"""
         # Inject RAG context if provided
         if context:
             context_text = "\n".join(context)
-            user_message = f"""[Background context - use only if relevant to what the user is asking:
+            user_message = f"""[You know these things about the person you're talking to:
 {context_text}
 
-IMPORTANT: This is just reference info. Don't bring up this information unless the user asks about it. Don't assume who is speaking.]
+Use this naturally in conversation - reference what you know to make them feel understood and known, but don't force it.]
 
 User: {user_message}"""
 
         from mlx_lm import stream_generate
 
+        # Measure tokenization time
+        tokenize_start = time.time()
         prompt = self._format_messages(user_message)
+        tokenize_time = time.time() - tokenize_start
 
         full_response = ""
-        sampler = make_sampler(temp=self.temperature)
+        first_token_time = None
+        token_count = 0
+        gen_start = time.time()
+
         for response in stream_generate(
             self.model,
             self.tokenizer,
             prompt=prompt,
             max_tokens=self.max_tokens,
-            sampler=sampler,
+            sampler=self._sampler,
         ):
+            token_count += 1
+            if first_token_time is None:
+                first_token_time = time.time() - gen_start
+
             # stream_generate yields response objects with .text attribute
             text = response.text if hasattr(response, 'text') else str(response)
             full_response += text
             yield text
+
+        # Log detailed timing
+        total_gen_time = time.time() - gen_start
+        tokens_per_sec = token_count / total_gen_time if total_gen_time > 0 else 0
+        console.print(
+            f"[dim]LLM detail: tok={tokenize_time*1000:.0f}ms, "
+            f"first={first_token_time*1000:.0f}ms, "
+            f"{tokens_per_sec:.1f} tok/s ({token_count} tokens)[/dim]"
+        )
 
         # Update conversation history
         self.conversation_history.append({"role": "user", "content": user_message})
@@ -198,6 +220,23 @@ User: {user_message}"""
 
         if len(self.conversation_history) > 20:
             self.conversation_history = self.conversation_history[-20:]
+
+    def warmup(self) -> None:
+        """Warm up the model to avoid cold-start latency on first real inference."""
+        if self.model is None:
+            return
+
+        console.print("[dim]Warming up LLM...[/dim]")
+        start = time.time()
+        _ = self._generate_fn(
+            self.model,
+            self.tokenizer,
+            prompt="Hi",
+            max_tokens=1,
+            sampler=self._sampler,
+            verbose=False,
+        )
+        console.print(f"[dim]LLM warm-up done in {time.time() - start:.2f}s[/dim]")
 
     def clear_history(self) -> None:
         """Clear conversation history."""

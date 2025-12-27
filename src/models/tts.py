@@ -75,19 +75,28 @@ class TextToSpeech:
         start = time.time()
 
         def do_load():
+            import os
+            # Enable MPS fallback BEFORE importing torch to avoid meta tensor issues
+            # This allows unsupported ops to fall back to CPU while keeping GPU for the rest
+            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
             import torch
             from kokoro import KPipeline
+
             # 'a' = American English, 'b' = British English
             lang_code = self.voice[0]  # 'a' or 'b'
+
             # Use MPS (Metal) for GPU acceleration on Apple Silicon
             device = "mps" if torch.backends.mps.is_available() else "cpu"
-            console.print(f"[dim]TTS using device: {device}[/dim]")
+
             try:
-                return KPipeline(lang_code=lang_code, device=device)
+                pipeline = KPipeline(lang_code=lang_code, device=device)
+                console.print(f"[green]TTS loaded on {device.upper()} (GPU accelerated)[/green]")
+                return pipeline
             except RuntimeError as e:
-                # PyTorch 2.9+ has meta tensor issues with MPS, fall back to CPU
-                if "meta tensor" in str(e) and device == "mps":
-                    console.print("[yellow]MPS failed, falling back to CPU[/yellow]")
+                # If MPS still fails, fall back to CPU
+                if device == "mps":
+                    console.print(f"[yellow]MPS failed ({str(e)[:50]}...), using CPU[/yellow]")
                     return KPipeline(lang_code=lang_code, device="cpu")
                 raise
 
@@ -232,17 +241,38 @@ class TextToSpeech:
 
         use_speed = speed if speed is not None else self.speed
 
+        start = time.time()
+        first_chunk_time = None
+        chunk_count = 0
+        total_audio_samples = 0
+
         for graphemes, phonemes, audio_chunk in self.pipeline(
             text,
             voice=self._get_voice_for_synthesis(),
             speed=use_speed,
         ):
+            chunk_count += 1
+            if first_chunk_time is None:
+                first_chunk_time = time.time() - start
+
             # Convert tensor to numpy if needed
             if hasattr(audio_chunk, 'numpy'):
                 audio_chunk = audio_chunk.numpy()
             elif hasattr(audio_chunk, '__array__'):
                 audio_chunk = np.asarray(audio_chunk)
+
+            total_audio_samples += len(audio_chunk)
             yield graphemes, phonemes, audio_chunk
+
+        # Log detailed TTS timing
+        total_time = time.time() - start
+        audio_duration = total_audio_samples / self.sample_rate if total_audio_samples > 0 else 0
+        rtf = total_time / audio_duration if audio_duration > 0 else 0  # Real-time factor
+        console.print(
+            f"[dim]TTS detail: first={first_chunk_time*1000:.0f}ms, "
+            f"{chunk_count} chunks, {audio_duration:.2f}s audio, "
+            f"RTF={rtf:.2f}x[/dim]"
+        )
 
     def list_voices(self) -> dict[str, str]:
         """List available voices with descriptions."""

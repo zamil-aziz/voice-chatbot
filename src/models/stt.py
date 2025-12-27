@@ -62,11 +62,12 @@ class SpeechToText:
     def _load_vad(self) -> None:
         """Load shared Silero VAD model for silence trimming."""
         try:
-            self.vad_model, self.get_speech_timestamps = get_vad_model()
+            self.vad_model, self.get_speech_timestamps, self.vad_device = get_vad_model()
         except Exception as e:
             console.print(f"[yellow]VAD for trimming not available: {e}[/yellow]")
             self.vad_model = None
             self.get_speech_timestamps = None
+            self.vad_device = "cpu"
 
     def _trim_silence(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """Trim silence from audio using VAD."""
@@ -75,7 +76,8 @@ class SpeechToText:
 
         import torch
 
-        audio_tensor = torch.from_numpy(audio)
+        # Move tensor to GPU if available for faster processing
+        audio_tensor = torch.from_numpy(audio).to(self.vad_device)
         speech_timestamps = self.get_speech_timestamps(
             audio_tensor, self.vad_model, sampling_rate=sample_rate
         )
@@ -120,6 +122,7 @@ class SpeechToText:
         self,
         audio: np.ndarray,
         sample_rate: int = 16000,
+        skip_vad_trim: bool = False,
     ) -> str:
         """
         Transcribe audio to text.
@@ -127,6 +130,8 @@ class SpeechToText:
         Args:
             audio: Audio samples as numpy array (float32, mono)
             sample_rate: Sample rate in Hz (default 16000)
+            skip_vad_trim: If True, skip VAD-based silence trimming (useful when
+                          audio already comes from pipeline with VAD boundaries)
 
         Returns:
             Transcribed text
@@ -144,8 +149,9 @@ class SpeechToText:
         if np.abs(audio).max() > 1.0:
             audio = audio / np.abs(audio).max()
 
-        # Trim silence using VAD to prevent hallucinations
-        audio = self._trim_silence(audio, sample_rate)
+        # Trim silence using VAD to prevent hallucinations (skip if already trimmed)
+        if not skip_vad_trim:
+            audio = self._trim_silence(audio, sample_rate)
 
         if len(audio) < sample_rate * 0.1:  # Less than 100ms of audio
             console.print("[dim]Audio too short, skipping[/dim]")
@@ -173,6 +179,22 @@ class SpeechToText:
         console.print(f"[dim]STT ({elapsed:.2f}s): {text}[/dim]")
 
         return text
+
+    def warmup(self) -> None:
+        """Warm up the model to avoid cold-start latency on first real transcription."""
+        if self.model is None:
+            return
+
+        console.print("[dim]Warming up Whisper...[/dim]")
+        start = time.time()
+        dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
+        _ = self.model.transcribe(
+            dummy_audio,
+            path_or_hf_repo=self.model_name,
+            language=self.language,
+            fp16=True,
+        )
+        console.print(f"[dim]Whisper warm-up done in {time.time() - start:.2f}s[/dim]")
 
     def transcribe_file(self, audio_path: str | Path) -> str:
         """

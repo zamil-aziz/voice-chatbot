@@ -83,6 +83,9 @@ class VoicePipeline:
         self._stop_event = threading.Event()
         self._active_threads: list = []
 
+        # Reusable executor for background tasks (RAG, etc.)
+        self._executor = ThreadPoolExecutor(max_workers=2)
+
     @property
     def is_processing(self) -> bool:
         """Thread-safe getter for is_processing flag."""
@@ -158,6 +161,14 @@ class VoicePipeline:
             for future in as_completed(futures):
                 model_name = future.result()
                 console.print(f"[green]✓ {model_name} loaded[/green]")
+
+        # Warm up models SEQUENTIALLY to avoid Metal GPU conflicts
+        # (Multiple GPU operations in parallel cause command buffer crashes)
+        console.print("\n[dim]Warming up models...[/dim]")
+        if self.stt:
+            self.stt.warmup()
+        if self.llm:
+            self.llm.warmup()
 
         self._models_loaded = True
         total_time = time.time() - start_time
@@ -320,9 +331,10 @@ class VoicePipeline:
 
         try:
             # Step 1: Transcribe speech
+            # Skip VAD trimming since pipeline VAD already detected speech boundaries
             console.print("\n[cyan]Transcribing...[/cyan]")
             start = time.time()
-            text = self.stt.transcribe(audio)
+            text = self.stt.transcribe(audio, skip_vad_trim=True)
             stt_time = time.time() - start
 
             if not text.strip():
@@ -331,10 +343,10 @@ class VoicePipeline:
 
             console.print(f"[bold white]You:[/bold white] {text}")
 
-            # Retrieve relevant context from RAG
-            rag_context = []
+            # Start RAG search in background while we prepare LLM
+            rag_future = None
             if self.rag:
-                rag_context = self.rag.search(text, n_results=2)
+                rag_future = self._executor.submit(self.rag.search, text, 2)
 
             # Step 2 & 3: Stream LLM → TTS (overlapped for lower latency)
             console.print("[cyan]Thinking...[/cyan]")
@@ -345,11 +357,23 @@ class VoicePipeline:
             # Start audio streaming
             self.player.start_streaming()
 
+            # Get RAG results (should be ready by now or very soon)
+            rag_context = []
+            if rag_future:
+                try:
+                    rag_context = rag_future.result(timeout=0.2)  # Max 200ms wait
+                except Exception:
+                    pass  # Skip RAG if too slow
+
             # Buffer for accumulating LLM tokens until sentence boundary
             # Using lists for efficient accumulation (avoids string concat overhead)
             sentence_tokens: list = []
             response_tokens: list = []
             sentence_endings = ('.', '!', '?')
+            # Clause triggers for faster first audio (comma, semicolon, colon, dash)
+            clause_triggers = (',', ';', ':', ' -')
+            min_clause_chars = 20  # Minimum chars before clause trigger applies
+            first_audio_started = False
 
             for token in self.llm.generate_stream(text, context=rag_context):
                 if self._stop_event.is_set():
@@ -360,17 +384,28 @@ class VoicePipeline:
 
                 # Check for sentence boundary (check token directly, not full buffer)
                 token_stripped = token.rstrip()
-                if token_stripped and token_stripped[-1] in sentence_endings:
-                    sentence = ''.join(sentence_tokens).strip()
+                current_text = ''.join(sentence_tokens).strip()
+
+                # Determine if we should trigger TTS
+                should_trigger = token_stripped and token_stripped[-1] in sentence_endings
+
+                # For first audio only: also trigger on clause boundaries for faster response
+                if not first_audio_started and not should_trigger and len(current_text) >= min_clause_chars:
+                    if any(current_text.endswith(trigger) for trigger in clause_triggers):
+                        should_trigger = True
+
+                if should_trigger:
+                    sentence = current_text
                     if sentence:
-                        # First sentence: record time to first audio
+                        # First sentence/clause: record time to first audio
                         if tts_start is None:
                             tts_start = time.time()
                             llm_time = tts_start - llm_start
-                            console.print(f"[dim]LLM first sentence: {llm_time:.2f}s[/dim]")
+                            console.print(f"[dim]LLM first chunk: {llm_time:.2f}s[/dim]")
 
-                        # Synthesize this sentence immediately
+                        # Synthesize this sentence/clause immediately
                         self._synthesize_sentence(sentence)
+                        first_audio_started = True
 
                         if first_audio_time is None:
                             first_audio_time = time.time() - llm_start
@@ -532,6 +567,10 @@ class VoicePipeline:
             if thread.is_alive():
                 thread.join(timeout=2.0)
         self._active_threads.clear()
+
+        # Shutdown background executor
+        if self._executor:
+            self._executor.shutdown(wait=False)
 
         if self.capture:
             self.capture.stop()

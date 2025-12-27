@@ -54,8 +54,8 @@ class VoiceActivityDetector:
         # Probability history for smoothing
         self.prob_history = deque(maxlen=10)
 
-        # Use shared VAD model singleton
-        self.model, self.get_speech_timestamps = get_vad_model()
+        # Use shared VAD model singleton (includes device for GPU acceleration)
+        self.model, self.get_speech_timestamps, self.device = get_vad_model()
 
     def get_speech_probability(self, audio_chunk: np.ndarray) -> float:
         """
@@ -77,8 +77,8 @@ class VoiceActivityDetector:
         if np.abs(audio_chunk).max() > 1.0:
             audio_chunk = audio_chunk / np.abs(audio_chunk).max()
 
-        # Convert to tensor
-        audio_tensor = torch.from_numpy(audio_chunk)
+        # Convert to tensor and move to GPU if available
+        audio_tensor = torch.from_numpy(audio_chunk).to(self.device)
 
         # Get probability
         speech_prob = self.model(audio_tensor, self.sample_rate).item()

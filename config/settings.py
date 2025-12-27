@@ -86,6 +86,7 @@ class VoiceBlendConfig(BaseModel):
 class TextProcessingSettings(BaseModel):
     """Text preprocessing settings for TTS prosody enhancement."""
     enabled: bool = False
+    expand_interjections: bool = True  # Expand "Oh" -> "Ohhh" to fix rushed pronunciation
     add_breathing_pauses: bool = True  # Add ellipses before conjunctions
     add_emphasis_markers: bool = True  # Add commas after "Well", "Actually"
 

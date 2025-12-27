@@ -9,6 +9,20 @@ from typing import Optional
 from config.settings import TextProcessingSettings
 
 
+# Interjection expansions to fix rushed/sped-up pronunciation in Kokoro TTS
+# These short words get unnaturally short durations without expansion
+INTERJECTION_EXPANSIONS = [
+    (r'\bOh\b', 'Ohhh'),
+    (r'\bHmm\b', 'Hmmm'),
+    (r'\bAh\b', 'Ahhh'),
+    (r'\bUh\b', 'Uhhh'),
+    (r'\bWow\b', 'Woww'),
+    (r'\bHuh\b', 'Huhh'),
+    (r'\bOoh\b', 'Oooh'),
+    (r'\bAww\b', 'Awww'),
+]
+
+
 class TextPreprocessor:
     """
     Preprocess text to improve TTS prosody.
@@ -35,6 +49,11 @@ class TextPreprocessor:
         Returns:
             Preprocessed text with prosody cues
         """
+        # Interjection expansion runs independently of 'enabled' flag
+        # because it's a TTS bug workaround, not an optional feature
+        if self.config.expand_interjections:
+            text = self._expand_interjections(text)
+
         if not self.config.enabled:
             return text
 
@@ -44,6 +63,36 @@ class TextPreprocessor:
         if self.config.add_emphasis_markers:
             text = self._add_emphasis_markers(text)
 
+        return text
+
+    def _expand_interjections(self, text: str) -> str:
+        """
+        Expand short interjections to prevent rushed pronunciation.
+
+        Kokoro TTS produces unnaturally short/sped-up audio for brief
+        interjections like "Oh", "Hmm", "Ah". Expanding them forces
+        longer phoneme durations.
+
+        Examples:
+            "Oh, okay." -> "Ohhh, okay."
+            "Hmm, let me think." -> "Hmmm, let me think."
+        """
+        def preserve_case(match, replacement):
+            """Preserve the case of the original match."""
+            original = match.group(0)
+            if original.isupper():
+                return replacement.upper()
+            elif original[0].isupper():
+                return replacement.capitalize()
+            return replacement.lower()
+
+        for pattern, replacement in INTERJECTION_EXPANSIONS:
+            text = re.sub(
+                pattern,
+                lambda m: preserve_case(m, replacement),
+                text,
+                flags=re.IGNORECASE
+            )
         return text
 
     def _add_breathing_pauses(self, text: str) -> str:
@@ -103,6 +152,12 @@ if __name__ == "__main__":
     preprocessor = TextPreprocessor()
 
     test_sentences = [
+        # Interjection expansion tests
+        "Oh, okay.",
+        "Hmm, let me think about that.",
+        "Ah, I see what you mean.",
+        "oh really? wow!",
+        # Other prosody tests
         "Well I think that's a great idea.",
         "I went to the store and then I came home and made dinner.",
         "Actually I'm not sure about that.",

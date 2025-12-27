@@ -113,7 +113,7 @@ Be natural and warm in your tone."""
             user_message = f"""[You know these things about the person you're talking to:
 {context_text}
 
-Use this naturally in conversation - reference what you know to make them feel understood and known, but don't force it.]
+Weave this knowledge into your response - mention specific details you know about them to show you remember and care. Make them feel known.]
 
 User: {user_message}"""
 
@@ -171,7 +171,7 @@ User: {user_message}"""
             user_message = f"""[You know these things about the person you're talking to:
 {context_text}
 
-Use this naturally in conversation - reference what you know to make them feel understood and known, but don't force it.]
+Weave this knowledge into your response - mention specific details you know about them to show you remember and care. Make them feel known.]
 
 User: {user_message}"""
 

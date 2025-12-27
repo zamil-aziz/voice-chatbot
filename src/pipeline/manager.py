@@ -4,6 +4,7 @@ Orchestrates the full STT → LLM → TTS flow.
 """
 
 import json
+import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -86,6 +87,9 @@ class VoicePipeline:
         # Reusable executor for background tasks (RAG, etc.)
         self._executor = ThreadPoolExecutor(max_workers=2)
 
+        # Track which notes have been mentioned to avoid repetition
+        self._used_note_indices: set[int] = set()
+
     @property
     def is_processing(self) -> bool:
         """Thread-safe getter for is_processing flag."""
@@ -97,6 +101,24 @@ class VoicePipeline:
         """Thread-safe setter for is_processing flag."""
         with self._processing_lock:
             self._is_processing = value
+
+    def _extract_user_name(self) -> Optional[str]:
+        """Extract user's name from conversation history."""
+        if not self.llm or not self.llm.conversation_history:
+            return None
+        for msg in self.llm.conversation_history:
+            if msg["role"] == "user":
+                # Match "My name is X" or "I'm X" or "I am X"
+                match = re.search(r"(?:my name is|i'm|i am)\s+(\w+)", msg["content"], re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        return None
+
+    def clear_conversation(self) -> None:
+        """Clear conversation history and used notes tracking."""
+        if self.llm:
+            self.llm.conversation_history.clear()
+        self._used_note_indices.clear()
 
     def _load_models(self, skip_stt: bool = False) -> None:
         """Load all models in parallel if not already loaded.
@@ -241,10 +263,17 @@ class VoicePipeline:
 
             console.print(f"[bold white]You:[/bold white] {text}")
 
-            # Retrieve relevant context from RAG
+            # Retrieve relevant context from RAG (excluding already-mentioned notes)
             rag_context = []
             if self.rag:
-                rag_context = self.rag.search(text, n_results=2)
+                user_name = self._extract_user_name()
+                rag_context, used_indices = self.rag.search(
+                    text,
+                    n_results=2,
+                    user_name=user_name,
+                    exclude_indices=self._used_note_indices,
+                )
+                self._used_note_indices.update(used_indices)
 
             # Stream LLM → TTS
             console.print("[cyan]Thinking...[/cyan]")
@@ -348,7 +377,15 @@ class VoicePipeline:
             # Start RAG search in background while we prepare LLM
             rag_future = None
             if self.rag:
-                rag_future = self._executor.submit(self.rag.search, text, 2)
+                user_name = self._extract_user_name()
+                rag_future = self._executor.submit(
+                    self.rag.search,
+                    text,
+                    2,
+                    0.15,
+                    user_name,
+                    self._used_note_indices,
+                )
 
             # Step 2 & 3: Stream LLM → TTS (overlapped for lower latency)
             console.print("[cyan]Thinking...[/cyan]")
@@ -363,7 +400,8 @@ class VoicePipeline:
             rag_context = []
             if rag_future:
                 try:
-                    rag_context = rag_future.result(timeout=0.2)  # Max 200ms wait
+                    rag_context, used_indices = rag_future.result(timeout=0.2)  # Max 200ms wait
+                    self._used_note_indices.update(used_indices)
                 except Exception:
                     pass  # Skip RAG if too slow
 

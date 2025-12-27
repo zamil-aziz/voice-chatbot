@@ -95,7 +95,7 @@ class VoiceBlendConfig(BaseModel):
 
 class TextProcessingSettings(BaseModel):
     """Text preprocessing settings for TTS prosody enhancement."""
-    enabled: bool = False
+    enabled: bool = True  # Enable for natural prosody
     expand_interjections: bool = True  # Expand "Oh" -> "Ohhh" to fix rushed pronunciation
     add_breathing_pauses: bool = True  # Add ellipses before conjunctions
     add_emphasis_markers: bool = True  # Add commas after "Well", "Actually"
@@ -103,22 +103,22 @@ class TextProcessingSettings(BaseModel):
 
 class SpeedControlSettings(BaseModel):
     """Dynamic speed control settings for natural pacing."""
-    enabled: bool = False
+    enabled: bool = True  # Enable for emotion-aware pacing
     base_speed: float = 1.0
-    min_speed: float = 0.8
-    max_speed: float = 1.2
-    question_speed_factor: float = 0.95  # Slightly slower for questions
-    exclamation_speed_factor: float = 1.05  # Slightly faster for exclamations
+    min_speed: float = 0.85  # Allow more slowdown for empathy
+    max_speed: float = 1.15  # Cap to avoid sounding rushed
+    question_speed_factor: float = 0.90  # Noticeably slower for questions
+    exclamation_speed_factor: float = 1.10  # Noticeably faster for excitement
     long_sentence_threshold: int = 15  # Words before considered "long"
     short_sentence_threshold: int = 5  # Words before considered "short"
 
 
 class PostProcessingSettings(BaseModel):
     """Audio post-processing settings for naturalness."""
-    enabled: bool = False
-    # Pitch variation adds subtle random pitch drift (like human speech)
-    pitch_variation_enabled: bool = True
-    pitch_variation_depth: float = 0.02  # Amount of variation (0.0-0.1)
+    enabled: bool = True  # Enable for dynamics/warmth
+    # Pitch variation - DISABLED: naive resampling causes robotic artifacts
+    pitch_variation_enabled: bool = False
+    pitch_variation_depth: float = 0.02
     # Dynamics processing evens out volume
     dynamics_enabled: bool = True
     compression_ratio: float = 2.0

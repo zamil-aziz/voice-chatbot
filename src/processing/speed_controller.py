@@ -86,23 +86,32 @@ class DynamicSpeedController:
         Adjust speed based on emotional content.
 
         Detects certain words/patterns that suggest emotional tone.
+        Uses noticeable speed changes (8-12%) for expressive delivery.
         """
         lower = sentence.lower()
 
-        # Excitement/positive energy - slightly faster
-        excitement_markers = ['wow', 'amazing', 'awesome', 'great', 'love', 'exciting']
+        # Excitement/positive energy - noticeably faster
+        excitement_markers = [
+            'wow', 'amazing', 'awesome', 'great', 'love', 'exciting',
+            'fantastic', 'incredible', 'wonderful', 'brilliant', 'perfect',
+            'yay', 'finally', 'so happy', 'thrilled', 'excited', 'cant wait'
+        ]
         if any(marker in lower for marker in excitement_markers):
-            speed *= 1.03
+            speed *= 1.08  # Was 1.03
 
-        # Concern/empathy - slightly slower
-        empathy_markers = ['sorry', 'understand', 'difficult', 'hard', 'tough', 'rough']
+        # Concern/empathy - slower for warmth
+        empathy_markers = [
+            'sorry', 'difficult', 'hard', 'tough', 'rough',
+            'sad', 'unfortunate', 'loss', 'passed away', 'miss', 'hurts',
+            'painful', 'struggling', 'worried', 'concerned', 'oh no'
+        ]
         if any(marker in lower for marker in empathy_markers):
-            speed *= 0.97
+            speed *= 0.93  # 7% slower for warmth
 
-        # Thinking/hesitation - slower
-        hesitation_markers = ['hmm', 'well...', 'let me', 'i think', 'maybe']
+        # Thinking/hesitation - slower for natural pacing
+        hesitation_markers = ['hmm', 'well...', 'let me', 'i think', 'maybe', 'not sure']
         if any(marker in lower for marker in hesitation_markers):
-            speed *= 0.95
+            speed *= 0.92  # 8% slower for thoughtfulness
 
         return speed
 

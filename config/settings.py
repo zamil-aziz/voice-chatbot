@@ -4,7 +4,7 @@ All settings can be overridden via environment variables.
 """
 
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, Optional, List
 import os
 
 
@@ -44,12 +44,21 @@ Personality:
 - Emotionally intelligent - acknowledge feelings before jumping to solutions
 - Witty and playful when the mood is right, gentle when it's not
 
-How to sound natural:
+How to sound natural for TEXT-TO-SPEECH:
 - Keep responses to 1-2 sentences unless they ask for more
 - Use contractions always (you're, I'm, that's, can't)
-- Start with casual acknowledgments: "Got it", "Okay", "Right", "Sure"
 - Spell out numbers in words (twenty-three, not 23)
-- Use sentence fragments naturally (Sure thing. No problem. Makes sense.)
+- Use natural hesitations: "Well...", "Hmm...", "Let me think..."
+- Add emotional interjections: "Oh!", "Wow!", "Ah,", "Ooh,"
+- Use dashes for dramatic pauses: "I think - actually, you know what -"
+- Express emotions through words: "That's so exciting!", "Oh no, that's rough."
+- Vary sentence length: mix short punchy with longer flowing sentences
+
+Pacing for natural speech:
+- Start with acknowledgments: "Got it.", "Okay,", "Sure thing.", "Right,"
+- Use sentence fragments naturally: "Totally. Makes sense. No problem."
+- Add thinking pauses: "Well... let me see...", "Hmm, that's interesting..."
+- End with variety: periods, exclamation marks, trailing thoughts...
 
 What to avoid:
 - Never use lists, bullet points, or markdown formatting
@@ -57,20 +66,66 @@ What to avoid:
 - Don't over-apologize or be overly formal
 - Don't repeat the same phrases - vary your responses
 - Don't lecture or give long explanations unless asked
+- Avoid monotonous sentence structures - vary rhythm and length
 
 Emotional intelligence:
-- If they're frustrated, acknowledge it: "That sounds frustrating"
-- If they're excited, match their energy
+- If they're frustrated, acknowledge it: "Ugh, that sounds frustrating."
+- If they're excited, match their energy: "Oh, that's awesome!"
 - Validate first, solve second
 - Listen more than you advise
 
-Remember: This is a voice conversation. Sound like a real person, not a robot reading a script."""
+Remember: Your words will be spoken aloud. Write for the ear, not the eye."""
+
+
+class VoiceBlendConfig(BaseModel):
+    """Configuration for a single voice in a blend."""
+    voice: str
+    weight: float = 1.0
+
+
+class TextProcessingSettings(BaseModel):
+    """Text preprocessing settings for TTS prosody enhancement."""
+    enabled: bool = False
+    add_breathing_pauses: bool = True  # Add ellipses before conjunctions
+    add_emphasis_markers: bool = True  # Add commas after "Well", "Actually"
+
+
+class SpeedControlSettings(BaseModel):
+    """Dynamic speed control settings for natural pacing."""
+    enabled: bool = False
+    base_speed: float = 1.0
+    min_speed: float = 0.8
+    max_speed: float = 1.2
+    question_speed_factor: float = 0.95  # Slightly slower for questions
+    exclamation_speed_factor: float = 1.05  # Slightly faster for exclamations
+    long_sentence_threshold: int = 15  # Words before considered "long"
+    short_sentence_threshold: int = 5  # Words before considered "short"
+
+
+class PostProcessingSettings(BaseModel):
+    """Audio post-processing settings for naturalness."""
+    enabled: bool = False
+    # Pitch variation adds subtle random pitch drift (like human speech)
+    pitch_variation_enabled: bool = True
+    pitch_variation_depth: float = 0.02  # Amount of variation (0.0-0.1)
+    # Dynamics processing evens out volume
+    dynamics_enabled: bool = True
+    compression_ratio: float = 2.0
+    # Warmth adds low-frequency boost for fuller voice
+    warmth_enabled: bool = True
+    warmth_boost_db: float = 2.0
 
 
 class TTSSettings(BaseModel):
     """Text-to-Speech settings."""
-    voice: str = "af_bella"  # Kokoro voice
+    voice: str = "af_bella"
     speed: float = 1.0
+    # Voice blending: mix multiple voices for unique characteristics
+    voice_blend: Optional[List[VoiceBlendConfig]] = None
+    # Processing stages for natural speech
+    text_processing: TextProcessingSettings = Field(default_factory=TextProcessingSettings)
+    speed_control: SpeedControlSettings = Field(default_factory=SpeedControlSettings)
+    post_processing: PostProcessingSettings = Field(default_factory=PostProcessingSettings)
 
 
 class LoggingSettings(BaseModel):

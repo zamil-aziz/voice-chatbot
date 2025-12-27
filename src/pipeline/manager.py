@@ -17,8 +17,9 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector
+from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector, AudioPostProcessor
 from ..models import SpeechToText, LanguageModel, TextToSpeech
+from ..processing import TextPreprocessor, DynamicSpeedController
 from config.settings import settings
 
 console = Console()
@@ -63,6 +64,14 @@ class VoicePipeline:
         self.capture: Optional[AudioCapture] = None
         self.player: Optional[AudioPlayer] = None
         self.vad: Optional[VoiceActivityDetector] = None
+
+        # Processing components for natural speech
+        self.text_preprocessor = TextPreprocessor(settings.tts.text_processing)
+        self.speed_controller = DynamicSpeedController(settings.tts.speed_control)
+        self.post_processor = AudioPostProcessor(
+            sample_rate=24000,
+            config=settings.tts.post_processing
+        )
 
         # State
         self.is_running = False
@@ -114,7 +123,18 @@ class VoicePipeline:
 
         def load_tts():
             if self.tts is None:
-                self.tts = TextToSpeech()
+                # Convert voice blend config to tuple format if configured
+                voice_blend = None
+                if settings.tts.voice_blend:
+                    voice_blend = [
+                        (vb.voice, vb.weight)
+                        for vb in settings.tts.voice_blend
+                    ]
+                self.tts = TextToSpeech(
+                    voice=settings.tts.voice,
+                    speed=settings.tts.speed,
+                    voice_blend=voice_blend,
+                )
             return "TTS"
 
         # Build list of models to load
@@ -162,10 +182,25 @@ class VoicePipeline:
             f.write(json.dumps(entry) + "\n")
 
     def _synthesize_sentence(self, sentence: str) -> None:
-        """Synthesize and queue a single sentence for playback."""
-        for _, _, audio_chunk in self.tts.synthesize_stream(sentence):
+        """Synthesize and queue a single sentence for playback with enhancements."""
+        # Step 1: Preprocess text for better prosody
+        processed_sentence = self.text_preprocessor.process(sentence)
+
+        # Step 2: Calculate dynamic speed based on content
+        speed = self.speed_controller.get_sentence_speed(
+            processed_sentence,
+            base_speed=settings.tts.speed
+        )
+
+        # Step 3: Synthesize with calculated speed
+        for _, _, audio_chunk in self.tts.synthesize_stream(processed_sentence, speed=speed):
             if self._stop_event.is_set():
                 break
+
+            # Step 4: Apply audio post-processing for naturalness
+            if settings.tts.post_processing.enabled:
+                audio_chunk = self.post_processor.process(audio_chunk)
+
             self.player.queue_audio(audio_chunk, self.tts.sample_rate)
 
     def process_text(self, text: str) -> None:

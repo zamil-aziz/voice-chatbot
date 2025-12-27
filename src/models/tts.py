@@ -5,7 +5,7 @@ Produces realistic, natural-sounding speech.
 
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Optional
+from typing import Optional, List, Tuple, Union
 import numpy as np
 
 from rich.console import Console
@@ -59,11 +59,14 @@ class TextToSpeech:
         voice: str = "af_heart",
         speed: float = 1.0,
         sample_rate: int = 24000,
+        voice_blend: Optional[List[Tuple[str, float]]] = None,
     ):
         self.voice = voice
         self.speed = speed
         self.sample_rate = sample_rate
+        self.voice_blend = voice_blend  # e.g., [("af_bella", 0.6), ("af_heart", 0.4)]
         self.pipeline = None
+        self._blended_voice_tensor = None
         self._load_model()
 
     def _load_model(self) -> None:
@@ -86,6 +89,10 @@ class TextToSpeech:
                 future = executor.submit(do_load)
                 self.pipeline = future.result(timeout=settings.model_load_timeout)
 
+            # Create blended voice if configured
+            if self.voice_blend:
+                self._create_blended_voice()
+
             console.print(
                 f"[green]TTS ready in {time.time() - start:.2f}s[/green]"
             )
@@ -98,12 +105,67 @@ class TextToSpeech:
             console.print("[yellow]Run: pip install kokoro[/yellow]")
             raise
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+    def _create_blended_voice(self) -> None:
+        """
+        Create a blended voice tensor from multiple voices.
+
+        Voice blending allows mixing characteristics from different voices
+        to create unique, more expressive voice profiles.
+        """
+        import torch
+
+        if not self.voice_blend or len(self.voice_blend) == 0:
+            return
+
+        console.print(f"[dim]Creating voice blend: {self.voice_blend}[/dim]")
+
+        tensors = []
+        weights = []
+
+        for voice_name, weight in self.voice_blend:
+            if voice_name not in self.VOICES:
+                console.print(f"[yellow]Warning: Unknown voice '{voice_name}' in blend[/yellow]")
+                continue
+            try:
+                # Load voice tensor using Kokoro's internal method
+                # Kokoro stores voice tensors that can be averaged
+                voice_tensor = self.pipeline.load_voice(voice_name)
+                tensors.append(voice_tensor)
+                weights.append(weight)
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not load voice '{voice_name}': {e}[/yellow]")
+
+        if len(tensors) < 2:
+            console.print("[yellow]Voice blend requires at least 2 voices, using default[/yellow]")
+            return
+
+        # Normalize weights
+        total_weight = sum(weights)
+        normalized_weights = [w / total_weight for w in weights]
+
+        # Weighted blend of voice tensors
+        blended = sum(t * w for t, w in zip(tensors, normalized_weights))
+        self._blended_voice_tensor = blended
+
+        voice_desc = ", ".join(f"{v}:{w:.0%}" for v, w in zip(
+            [vb[0] for vb in self.voice_blend],
+            normalized_weights
+        ))
+        console.print(f"[green]Voice blend created: {voice_desc}[/green]")
+
+    def _get_voice_for_synthesis(self) -> Union[str, "torch.Tensor"]:
+        """Get the voice to use for synthesis (blended tensor or voice name)."""
+        if self._blended_voice_tensor is not None:
+            return self._blended_voice_tensor
+        return self.voice
+
+    def synthesize(self, text: str, speed: Optional[float] = None) -> tuple[np.ndarray, int]:
         """
         Synthesize speech from text.
 
         Args:
             text: Text to synthesize
+            speed: Optional speed override (uses instance speed if None)
 
         Returns:
             Tuple of (audio samples as float32 numpy array, sample rate)
@@ -112,12 +174,13 @@ class TextToSpeech:
             raise RuntimeError("Model not loaded")
 
         start = time.time()
+        use_speed = speed if speed is not None else self.speed
 
-        # Generate audio
+        # Generate audio (use blended voice if available)
         generator = self.pipeline(
             text,
-            voice=self.voice,
-            speed=self.speed,
+            voice=self._get_voice_for_synthesis(),
+            speed=use_speed,
         )
 
         # Collect all audio chunks (convert tensors to numpy)
@@ -146,12 +209,13 @@ class TextToSpeech:
 
         return audio, self.sample_rate
 
-    def synthesize_stream(self, text: str):
+    def synthesize_stream(self, text: str, speed: Optional[float] = None):
         """
         Synthesize speech with streaming output.
 
         Args:
             text: Text to synthesize
+            speed: Optional speed override (uses instance speed if None)
 
         Yields:
             Tuples of (graphemes, phonemes, audio_chunk)
@@ -159,10 +223,12 @@ class TextToSpeech:
         if self.pipeline is None:
             raise RuntimeError("Model not loaded")
 
+        use_speed = speed if speed is not None else self.speed
+
         for graphemes, phonemes, audio_chunk in self.pipeline(
             text,
-            voice=self.voice,
-            speed=self.speed,
+            voice=self._get_voice_for_synthesis(),
+            speed=use_speed,
         ):
             # Convert tensor to numpy if needed
             if hasattr(audio_chunk, 'numpy'):

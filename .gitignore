@@ -36,3 +36,7 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Personal notes
+data/notes.txt
+data/notes_db/

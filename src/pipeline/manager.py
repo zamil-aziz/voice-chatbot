@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector, AudioPostProcessor
-from ..models import SpeechToText, LanguageModel, TextToSpeech
+from ..models import SpeechToText, LanguageModel, TextToSpeech, NotesRAG
 from ..processing import TextPreprocessor, DynamicSpeedController
 from config.settings import settings
 
@@ -42,6 +42,7 @@ class VoicePipeline:
         stt: Optional[SpeechToText] = None,
         llm: Optional[LanguageModel] = None,
         tts: Optional[TextToSpeech] = None,
+        rag: Optional[NotesRAG] = None,
     ):
         """
         Initialize the voice pipeline.
@@ -50,6 +51,7 @@ class VoicePipeline:
             stt: Speech-to-text model (created if None)
             llm: Language model (created if None)
             tts: Text-to-speech model (created if None)
+            rag: RAG system for personal notes (created if None)
         """
         console.print("[bold]Initializing Voice Pipeline[/bold]")
         console.print("=" * 50)
@@ -58,6 +60,7 @@ class VoicePipeline:
         self.stt = stt
         self.llm = llm
         self.tts = tts
+        self.rag = rag
         self._models_loaded = False
 
         # Audio components
@@ -137,13 +140,20 @@ class VoicePipeline:
                 )
             return "TTS"
 
+        def load_rag():
+            if self.rag is None:
+                self.rag = NotesRAG()
+            # Trigger lazy loading
+            _ = self.rag.count()
+            return "RAG"
+
         # Build list of models to load
-        loaders = [load_llm, load_tts]
+        loaders = [load_llm, load_tts, load_rag]
         if not skip_stt:
             loaders.append(load_stt)
 
         # Load models in parallel
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(loader) for loader in loaders]
             for future in as_completed(futures):
                 model_name = future.result()
@@ -218,6 +228,11 @@ class VoicePipeline:
 
             console.print(f"[bold white]You:[/bold white] {text}")
 
+            # Retrieve relevant context from RAG
+            rag_context = []
+            if self.rag:
+                rag_context = self.rag.search(text, n_results=2)
+
             # Stream LLM → TTS
             console.print("[cyan]Thinking...[/cyan]")
             llm_start = time.time()
@@ -232,7 +247,7 @@ class VoicePipeline:
             response_tokens: list = []
             sentence_endings = ('.', '!', '?')
 
-            for token in self.llm.generate_stream(text):
+            for token in self.llm.generate_stream(text, context=rag_context):
                 if self._stop_event.is_set():
                     break
 
@@ -316,6 +331,11 @@ class VoicePipeline:
 
             console.print(f"[bold white]You:[/bold white] {text}")
 
+            # Retrieve relevant context from RAG
+            rag_context = []
+            if self.rag:
+                rag_context = self.rag.search(text, n_results=2)
+
             # Step 2 & 3: Stream LLM → TTS (overlapped for lower latency)
             console.print("[cyan]Thinking...[/cyan]")
             llm_start = time.time()
@@ -331,7 +351,7 @@ class VoicePipeline:
             response_tokens: list = []
             sentence_endings = ('.', '!', '?')
 
-            for token in self.llm.generate_stream(text):
+            for token in self.llm.generate_stream(text, context=rag_context):
                 if self._stop_event.is_set():
                     break
 

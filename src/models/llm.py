@@ -4,6 +4,7 @@ Optimized for Apple Silicon with streaming support.
 """
 
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Generator, Optional, List, Dict
 
@@ -73,7 +74,11 @@ Be natural and warm in your tone."""
 
     def _format_messages(self, user_message: str) -> str:
         """Format messages using the model's chat template."""
-        messages = [{"role": "system", "content": self.system_prompt}]
+        # Add current date so LLM knows what day it is
+        date_str = datetime.now().strftime("%B %d, %Y")
+        system_with_date = f"Today is {date_str}.\n\n{self.system_prompt}"
+
+        messages = [{"role": "system", "content": system_with_date}]
         messages.extend(self.conversation_history)
         messages.append({"role": "user", "content": user_message})
 
@@ -84,18 +89,24 @@ Be natural and warm in your tone."""
             add_generation_prompt=True,
         )
 
-    def generate(self, user_message: str) -> str:
+    def generate(self, user_message: str, context: Optional[List[str]] = None) -> str:
         """
         Generate a response to the user message.
 
         Args:
             user_message: The user's input text
+            context: Optional list of relevant context strings (from RAG)
 
         Returns:
             The assistant's response
         """
         if self.model is None:
             raise RuntimeError("Model not loaded")
+
+        # Inject RAG context if provided
+        if context:
+            context_text = "\n".join(context)
+            user_message = f"[Relevant information about the user/conversation:\n{context_text}]\n\nUser: {user_message}"
 
         start = time.time()
 
@@ -132,18 +143,24 @@ Be natural and warm in your tone."""
 
         return assistant_response
 
-    def generate_stream(self, user_message: str) -> Generator[str, None, None]:
+    def generate_stream(self, user_message: str, context: Optional[List[str]] = None) -> Generator[str, None, None]:
         """
         Generate a streaming response to the user message.
 
         Args:
             user_message: The user's input text
+            context: Optional list of relevant context strings (from RAG)
 
         Yields:
             Chunks of the assistant's response
         """
         if self.model is None:
             raise RuntimeError("Model not loaded")
+
+        # Inject RAG context if provided
+        if context:
+            context_text = "\n".join(context)
+            user_message = f"[Relevant information about the user/conversation:\n{context_text}]\n\nUser: {user_message}"
 
         from mlx_lm import stream_generate
 

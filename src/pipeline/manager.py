@@ -83,8 +83,12 @@ class VoicePipeline:
         with self._processing_lock:
             self._is_processing = value
 
-    def _load_models(self) -> None:
-        """Load all models in parallel if not already loaded."""
+    def _load_models(self, skip_stt: bool = False) -> None:
+        """Load all models in parallel if not already loaded.
+
+        Args:
+            skip_stt: If True, skip loading STT model (for text input mode)
+        """
         if self._models_loaded:
             return
 
@@ -113,13 +117,14 @@ class VoicePipeline:
                 self.tts = TextToSpeech()
             return "TTS"
 
-        # Load all models in parallel
+        # Build list of models to load
+        loaders = [load_llm, load_tts]
+        if not skip_stt:
+            loaders.append(load_stt)
+
+        # Load models in parallel
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(load_stt),
-                executor.submit(load_llm),
-                executor.submit(load_tts),
-            ]
+            futures = [executor.submit(loader) for loader in loaders]
             for future in as_completed(futures):
                 model_name = future.result()
                 console.print(f"[green]✓ {model_name} loaded[/green]")
@@ -162,6 +167,97 @@ class VoicePipeline:
             if self._stop_event.is_set():
                 break
             self.player.queue_audio(audio_chunk, self.tts.sample_rate)
+
+    def process_text(self, text: str) -> None:
+        """
+        Process text input directly (skips STT).
+
+        Args:
+            text: User's text input
+        """
+        self.is_processing = True
+
+        try:
+            if not text.strip():
+                return
+
+            console.print(f"[bold white]You:[/bold white] {text}")
+
+            # Stream LLM → TTS
+            console.print("[cyan]Thinking...[/cyan]")
+            llm_start = time.time()
+            tts_start = None
+            first_audio_time = None
+
+            # Start audio streaming
+            self.player.start_streaming()
+
+            # Buffer for accumulating LLM tokens until sentence boundary
+            sentence_tokens: list = []
+            response_tokens: list = []
+            sentence_endings = ('.', '!', '?')
+
+            for token in self.llm.generate_stream(text):
+                if self._stop_event.is_set():
+                    break
+
+                response_tokens.append(token)
+                sentence_tokens.append(token)
+
+                # Check for sentence boundary
+                token_stripped = token.rstrip()
+                if token_stripped and token_stripped[-1] in sentence_endings:
+                    sentence = ''.join(sentence_tokens).strip()
+                    if sentence:
+                        if tts_start is None:
+                            tts_start = time.time()
+                            llm_time = tts_start - llm_start
+                            console.print(f"[dim]LLM first sentence: {llm_time:.2f}s[/dim]")
+
+                        self._synthesize_sentence(sentence)
+
+                        if first_audio_time is None:
+                            first_audio_time = time.time() - llm_start
+
+                    sentence_tokens = []
+
+            # Handle any remaining text
+            remaining = ''.join(sentence_tokens).strip()
+            if remaining:
+                if tts_start is None:
+                    tts_start = time.time()
+                    llm_time = tts_start - llm_start
+                self._synthesize_sentence(remaining)
+
+            full_response = ''.join(response_tokens)
+
+            self.player.stop_streaming()
+
+            # Calculate timing
+            total_end = time.time()
+            if tts_start is None:
+                tts_start = llm_start
+                llm_time = 0
+            tts_time = total_end - tts_start
+
+            response = full_response.strip()
+            console.print(f"[bold green]Assistant:[/bold green] {response}")
+
+            # Log timing
+            total_time = total_end - llm_start
+            console.print(
+                f"[dim]Timing: LLM={llm_time:.2f}s, TTS={tts_time:.2f}s, "
+                f"Total={total_time:.2f}s"
+                + (f", First audio={first_audio_time:.2f}s" if first_audio_time else "")
+                + "[/dim]"
+            )
+
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.is_processing = False
 
     def process_utterance(self, audio: np.ndarray) -> None:
         """
@@ -332,6 +428,44 @@ class VoicePipeline:
             console.print("\n[yellow]Stopping...[/yellow]")
         finally:
             self.stop()
+
+    def run_text_mode(self) -> None:
+        """
+        Run in text input mode (type instead of speak).
+
+        Press Ctrl+C to stop.
+        """
+        self._load_models(skip_stt=True)
+
+        # Only need audio player for TTS output
+        self.player = AudioPlayer(sample_rate=24000)
+
+        console.print("\n" + "=" * 50)
+        console.print("[bold green]Text Input Mode[/bold green]")
+        console.print("Type your messages and press Enter. Press Ctrl+C to quit.")
+        console.print("=" * 50 + "\n")
+
+        self.is_running = True
+        self._stop_event.clear()
+
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    text = console.input("[bold white]You:[/bold white] ")
+                    if text.strip():
+                        self.process_text(text)
+                        console.print()  # Add spacing between turns
+                except EOFError:
+                    break
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Stopping...[/yellow]")
+        finally:
+            self._stop_event.set()
+            self.is_running = False
+            if self.player:
+                self.player.stop()
+            console.print("[green]Text mode stopped.[/green]")
 
     def stop(self) -> None:
         """Stop the voice pipeline."""

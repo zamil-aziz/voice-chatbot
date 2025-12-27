@@ -13,6 +13,7 @@ Components:
 
 Usage:
     python -m src.main              # Run voice assistant
+    python -m src.main --text       # Run in text input mode (type instead of speak)
     python -m src.main --test-stt   # Test speech-to-text
     python -m src.main --test-llm   # Test language model
     python -m src.main --test-tts   # Test text-to-speech
@@ -154,6 +155,22 @@ def run_assistant():
     pipeline.run()
 
 
+def run_text_mode():
+    """Run the voice assistant in text input mode."""
+    from .pipeline import VoicePipeline
+
+    console.print(
+        Panel.fit(
+            "[bold blue]Voice Chatbot[/bold blue]\n"
+            "[dim]Text Input Mode[/dim]",
+            border_style="blue",
+        )
+    )
+
+    pipeline = VoicePipeline()
+    pipeline.run_text_mode()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Voice Chatbot - Local AI Voice Assistant",
@@ -186,6 +203,11 @@ def main():
         action="store_true",
         help="Test all components",
     )
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Run in text input mode (type instead of speak)",
+    )
 
     args = parser.parse_args()
 
@@ -200,6 +222,8 @@ def main():
             test_vad()
         elif args.test_all:
             test_all()
+        elif args.text:
+            run_text_mode()
         else:
             run_assistant()
     except KeyboardInterrupt:

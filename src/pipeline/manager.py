@@ -169,6 +169,8 @@ class VoicePipeline:
             self.stt.warmup()
         if self.llm:
             self.llm.warmup()
+        if self.tts:
+            self.tts.warmup()
 
         self._models_loaded = True
         total_time = time.time() - start_time
@@ -372,7 +374,7 @@ class VoicePipeline:
             sentence_endings = ('.', '!', '?')
             # Clause triggers for faster first audio (comma, semicolon, colon, dash)
             clause_triggers = (',', ';', ':', ' -')
-            min_clause_chars = 20  # Minimum chars before clause trigger applies
+            min_clause_chars = 10  # Minimum chars before clause trigger applies (reduced for faster first audio)
             first_audio_started = False
 
             for token in self.llm.generate_stream(text, context=rag_context):

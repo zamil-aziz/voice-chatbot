@@ -145,9 +145,9 @@ User: {user_message}"""
             {"role": "assistant", "content": assistant_response}
         )
 
-        # Keep conversation history bounded
-        if len(self.conversation_history) > 20:
-            self.conversation_history = self.conversation_history[-20:]
+        # Keep conversation history bounded (6 turns = 12 messages for faster inference)
+        if len(self.conversation_history) > 12:
+            self.conversation_history = self.conversation_history[-12:]
 
         return assistant_response
 
@@ -218,8 +218,9 @@ User: {user_message}"""
             {"role": "assistant", "content": full_response.strip()}
         )
 
-        if len(self.conversation_history) > 20:
-            self.conversation_history = self.conversation_history[-20:]
+        # Keep conversation history bounded (6 turns = 12 messages for faster inference)
+        if len(self.conversation_history) > 12:
+            self.conversation_history = self.conversation_history[-12:]
 
     def warmup(self) -> None:
         """Warm up the model to avoid cold-start latency on first real inference."""

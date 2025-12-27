@@ -56,7 +56,7 @@ class TextToSpeech:
 
     def __init__(
         self,
-        voice: str = "af_heart",
+        voice: str = "af_nicole",
         speed: float = 1.0,
         sample_rate: int = 24000,
         voice_blend: Optional[List[Tuple[str, float]]] = None,
@@ -298,6 +298,19 @@ class TextToSpeech:
         if old_lang != new_lang:
             console.print(f"[yellow]Switching language, reloading model...[/yellow]")
             self._load_model()
+
+    def warmup(self) -> None:
+        """Warm up TTS to avoid cold-start latency on first real synthesis."""
+        if self.pipeline is None:
+            return
+
+        console.print("[dim]Warming up TTS...[/dim]")
+        start = time.time()
+        # Generate a short phrase to warm up the model
+        for _ in self.synthesize_stream("Hi", speed=1.0):
+            pass
+        elapsed = time.time() - start
+        console.print(f"[dim]TTS warm-up done in {elapsed:.2f}s[/dim]")
 
 
 # Quick test

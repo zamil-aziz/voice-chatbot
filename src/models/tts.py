@@ -82,7 +82,14 @@ class TextToSpeech:
             # Use MPS (Metal) for GPU acceleration on Apple Silicon
             device = "mps" if torch.backends.mps.is_available() else "cpu"
             console.print(f"[dim]TTS using device: {device}[/dim]")
-            return KPipeline(lang_code=lang_code, device=device)
+            try:
+                return KPipeline(lang_code=lang_code, device=device)
+            except RuntimeError as e:
+                # PyTorch 2.9+ has meta tensor issues with MPS, fall back to CPU
+                if "meta tensor" in str(e) and device == "mps":
+                    console.print("[yellow]MPS failed, falling back to CPU[/yellow]")
+                    return KPipeline(lang_code=lang_code, device="cpu")
+                raise
 
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:

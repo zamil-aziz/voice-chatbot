@@ -128,15 +128,15 @@ class VoiceBlendConfig(BaseModel):
 
 class TextProcessingSettings(BaseModel):
     """Text preprocessing settings for TTS prosody enhancement."""
-    enabled: bool = True  # Enable for natural prosody
-    expand_interjections: bool = True  # Expand "Oh" -> "Ohhh" to fix rushed pronunciation
-    add_breathing_pauses: bool = True  # Add ellipses before conjunctions
-    add_emphasis_markers: bool = True  # Add commas after "Well", "Actually"
-    # TTS normalization settings
-    expand_abbreviations: bool = True  # "Dr." -> "Doctor", "St." -> "Street"
-    replace_symbols: bool = True  # "&" -> "and", "%" -> "percent"
-    format_currency: bool = True  # "$50" -> "fifty dollars"
-    format_phone_numbers: bool = True  # "5023456789" -> "5 0 2, 3 4 5, 6 7 8 9"
+    enabled: bool = False  # Disabled - raw Kokoro sounds better
+    expand_interjections: bool = True  # Keep enabled - fixes TTS bug with rushed "Oh", "Hmm"
+    add_breathing_pauses: bool = False  # Disabled - degrades quality
+    add_emphasis_markers: bool = False  # Disabled - degrades quality
+    # TTS normalization settings (disabled - LLM handles formatting)
+    expand_abbreviations: bool = False  # LLM writes "Doctor" not "Dr."
+    replace_symbols: bool = False  # LLM writes "and" not "&"
+    format_currency: bool = False  # LLM writes "fifty dollars" not "$50"
+    format_phone_numbers: bool = False  # LLM formats phone numbers
 
 
 class SpeedControlSettings(BaseModel):
@@ -153,21 +153,21 @@ class SpeedControlSettings(BaseModel):
 
 class PostProcessingSettings(BaseModel):
     """Audio post-processing settings for naturalness."""
-    enabled: bool = True  # Enable for dynamics/warmth
-    # Pitch variation - DISABLED: naive resampling causes robotic artifacts
+    enabled: bool = False  # Disabled - raw Kokoro sounds better
+    # Pitch variation - causes robotic artifacts
     pitch_variation_enabled: bool = False
     pitch_variation_depth: float = 0.02
-    # Dynamics processing evens out volume
-    dynamics_enabled: bool = True
+    # Dynamics processing - disabled, reduces natural dynamics
+    dynamics_enabled: bool = False
     compression_ratio: float = 2.0
-    # Warmth adds low-frequency boost for fuller voice
-    warmth_enabled: bool = True
+    # Warmth - disabled, muddies the audio
+    warmth_enabled: bool = False
     warmth_boost_db: float = 2.0
 
 
 class TTSSettings(BaseModel):
     """Text-to-Speech settings."""
-    voice: str = "af_bella"
+    voice: str = "af_heart"  # Highest quality voice [A grade]
     speed: float = 1.0
     # Voice blending: mix multiple voices for unique characteristics
     voice_blend: Optional[List[VoiceBlendConfig]] = None

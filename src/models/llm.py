@@ -106,7 +106,12 @@ Be natural and warm in your tone."""
         # Inject RAG context if provided
         if context:
             context_text = "\n".join(context)
-            user_message = f"[Relevant information about the user/conversation:\n{context_text}]\n\nUser: {user_message}"
+            user_message = f"""[Background context - use only if relevant to what the user is asking:
+{context_text}
+
+IMPORTANT: This is just reference info. Don't bring up this information unless the user asks about it. Don't assume who is speaking.]
+
+User: {user_message}"""
 
         start = time.time()
 
@@ -160,7 +165,12 @@ Be natural and warm in your tone."""
         # Inject RAG context if provided
         if context:
             context_text = "\n".join(context)
-            user_message = f"[Relevant information about the user/conversation:\n{context_text}]\n\nUser: {user_message}"
+            user_message = f"""[Background context - use only if relevant to what the user is asking:
+{context_text}
+
+IMPORTANT: This is just reference info. Don't bring up this information unless the user asks about it. Don't assume who is speaking.]
+
+User: {user_message}"""
 
         from mlx_lm import stream_generate
 

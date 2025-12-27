@@ -2,6 +2,7 @@
 Audio playback module for playing synthesized speech.
 """
 
+import collections
 import numpy as np
 import threading
 import queue
@@ -111,28 +112,77 @@ class AudioPlayer:
         sd.stop()
         self.is_playing = False
 
+        # Clear the ring buffer if it exists (for streaming mode)
+        if hasattr(self, '_stream_buffer') and hasattr(self, '_buffer_lock'):
+            with self._buffer_lock:
+                self._stream_buffer.clear()
+
     def start_streaming(self) -> None:
         """Start background streaming playback."""
         self._stop_flag.clear()
         self._audio_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self.is_playing = True  # Mark as playing immediately for barge-in detection
 
+        # Ring buffer for gapless playback
+        self._stream_buffer: collections.deque = collections.deque()
+        self._buffer_lock = threading.Lock()
+        self._stream_started = threading.Event()
+
         def stream_worker():
             import sounddevice as sd
 
-            while not self._stop_flag.is_set():
-                try:
-                    audio, sr = self._audio_queue.get(timeout=0.1)
-                    if audio is None:  # Sentinel to stop
-                        break
+            def audio_callback(outdata, frames, time_info, status):
+                with self._buffer_lock:
+                    available = len(self._stream_buffer)
+                    if available >= frames:
+                        # Fill output from buffer
+                        for i in range(frames):
+                            outdata[i, 0] = self._stream_buffer.popleft()
+                    elif available > 0:
+                        # Partial buffer - use what we have, pad with silence
+                        for i in range(available):
+                            outdata[i, 0] = self._stream_buffer.popleft()
+                        outdata[available:, 0] = 0
+                    else:
+                        # Buffer empty - output silence
+                        outdata[:, 0] = 0
 
-                    self.is_playing = True
-                    sd.play(audio, sr, device=self.device)
-                    sd.wait()
-                    self.is_playing = False
+            # Open continuous output stream
+            with sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype=np.float32,
+                callback=audio_callback,
+                device=self.device,
+                blocksize=1024,  # ~42ms at 24kHz
+            ):
+                self._stream_started.set()
 
-                except queue.Empty:
-                    continue
+                while not self._stop_flag.is_set():
+                    try:
+                        audio, sr = self._audio_queue.get(timeout=0.1)
+                        if audio is None:  # Sentinel to stop
+                            # Wait for buffer to drain before exiting
+                            while len(self._stream_buffer) > 0 and not self._stop_flag.is_set():
+                                threading.Event().wait(0.05)
+                            break
+
+                        # Add audio to ring buffer
+                        if audio.dtype != np.float32:
+                            audio = audio.astype(np.float32)
+                        flat_audio = audio.flatten()
+
+                        with self._buffer_lock:
+                            self._stream_buffer.extend(flat_audio)
+
+                    except queue.Empty:
+                        # Check if buffer is empty and we should stop
+                        with self._buffer_lock:
+                            if len(self._stream_buffer) == 0:
+                                self.is_playing = False
+                            else:
+                                self.is_playing = True
+                        continue
 
         self._playback_thread = threading.Thread(target=stream_worker, daemon=True)
         self._playback_thread.start()

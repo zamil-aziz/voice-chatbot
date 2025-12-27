@@ -13,7 +13,7 @@ from config.settings import TextProcessingSettings
 # These short words get unnaturally short durations without expansion
 INTERJECTION_EXPANSIONS = [
     (r'\bOh\b', 'Ohhh'),
-    (r'\bHmm\b', 'Hmmm'),
+    (r'\bHmm\b', 'Mmm'),  # Drop H - Kokoro misreads "Hmm" as letter sounds
     (r'\bAh\b', 'Ahhh'),
     (r'\bUh\b', 'Uhhh'),
     (r'\bWow\b', 'Woww'),

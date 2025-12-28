@@ -26,18 +26,20 @@ EMOJI_PATTERN = re.compile(
 )
 
 
-# Interjection expansions to fix rushed/sped-up pronunciation in Kokoro TTS
-# These short words get unnaturally short durations without expansion
+# Filler word removal - Kokoro TTS can't pronounce these naturally
+# (trained on clean studio speech, not conversational disfluencies)
 # Pre-compiled for performance (these run on every TTS call)
-INTERJECTION_EXPANSIONS = [
-    (re.compile(r'\bOh\b', re.IGNORECASE), 'Ohhh'),
-    (re.compile(r'\bHmm+\b\.?\.?\.?\s*', re.IGNORECASE), ''),  # Remove Hmm entirely - Kokoro can't pronounce it
-    (re.compile(r'\bAw+\b,?\s*', re.IGNORECASE), ''),  # Remove Aw entirely - sounds weird in TTS
-    (re.compile(r'\bAh\b', re.IGNORECASE), 'Ahhh'),
-    (re.compile(r'\bUh\b', re.IGNORECASE), 'Uhhh'),
-    (re.compile(r'\bWow\b', re.IGNORECASE), 'Woww'),
-    (re.compile(r'\bHuh\b', re.IGNORECASE), 'Huhh'),
-    (re.compile(r'\bOoh\b', re.IGNORECASE), 'Oooh'),
+FILLER_WORD_REMOVALS = [
+    (re.compile(r'\bOh+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Oh
+    (re.compile(r'\bHmm+\b[,.]?\.?\.?\s*', re.IGNORECASE), ''),  # Remove Hmm
+    (re.compile(r'\bAw+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Aw
+    (re.compile(r'\bAh+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Ah
+    (re.compile(r'\bUh+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Uh
+    (re.compile(r'\bUm+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Um
+    (re.compile(r'\bHuh\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Huh
+    (re.compile(r'\bOoh+\b[,.]?\s*', re.IGNORECASE), ''),    # Remove Ooh
+    (re.compile(r"\by'know\b[,.]?\s*", re.IGNORECASE), ''),  # Remove y'know
+    (re.compile(r'\blike,\s+', re.IGNORECASE), ''),          # Remove "like," (filler usage)
 ]
 
 # Abbreviation expansions for natural TTS pronunciation
@@ -115,10 +117,10 @@ class TextPreprocessor:
         # Strip emojis first - TTS will read them aloud otherwise
         text = EMOJI_PATTERN.sub('', text)
 
-        # Interjection expansion runs independently of 'enabled' flag
-        # because it's a TTS bug workaround, not an optional feature
+        # Filler word removal runs independently of 'enabled' flag
+        # because TTS can't pronounce them naturally
         if self.config.expand_interjections:
-            text = self._expand_interjections(text)
+            text = self._remove_filler_words(text)
 
         if not self.config.enabled:
             return text
@@ -145,35 +147,24 @@ class TextPreprocessor:
 
         return text
 
-    def _expand_interjections(self, text: str) -> str:
+    def _remove_filler_words(self, text: str) -> str:
         """
-        Expand short interjections to prevent rushed pronunciation.
+        Remove filler words that TTS can't pronounce naturally.
 
-        Kokoro TTS produces unnaturally short/sped-up audio for brief
-        interjections like "Oh", "Hmm", "Ah". Expanding them forces
-        longer phoneme durations.
+        Kokoro TTS was trained on clean studio speech, not natural
+        conversations, so filler words like "Oh", "Hmm", "Um" sound
+        robotic and unnatural. Remove them entirely.
 
         Examples:
-            "Oh, okay." -> "Ohhh, okay."
-            "Hmm, let me think." -> "Hmmm, let me think."
+            "Oh, okay." -> "okay."
+            "Hmm, let me think." -> "let me think."
+            "Um, like, y'know what I mean?" -> "what I mean?"
         """
-        def preserve_case(match, replacement):
-            """Preserve the case of the original match."""
-            original = match.group(0)
-            if not replacement:  # Empty replacement (removing the match)
-                return ''
-            if original.isupper():
-                return replacement.upper()
-            elif original[0].isupper():
-                return replacement.capitalize()
-            return replacement.lower()
-
-        # Use pre-compiled patterns from INTERJECTION_EXPANSIONS
-        for compiled_pattern, replacement in INTERJECTION_EXPANSIONS:
-            text = compiled_pattern.sub(
-                lambda m, r=replacement: preserve_case(m, r),
-                text
-            )
+        for compiled_pattern, replacement in FILLER_WORD_REMOVALS:
+            text = compiled_pattern.sub(replacement, text)
+        # Clean up any double spaces or leading spaces from removals
+        text = re.sub(r'  +', ' ', text)
+        text = re.sub(r'^\s+', '', text)
         return text
 
     def _add_breathing_pauses(self, text: str) -> str:
@@ -344,11 +335,11 @@ if __name__ == "__main__":
     preprocessor = TextPreprocessor()
 
     test_sentences = [
-        # Interjection expansion tests
+        # Filler word removal tests
         "Oh, okay.",
         "Hmm, let me think about that.",
         "Ah, I see what you mean.",
-        "oh really? wow!",
+        "Um, like, y'know what I mean?",
         # Prosody tests
         "Well I think that's a great idea.",
         "I went to the store and then I came home and made dinner.",

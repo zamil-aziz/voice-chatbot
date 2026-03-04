@@ -10,8 +10,8 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 - **Natural Voice**: 28 high-quality voices with Kokoro TTS
 - **Fast**: Optimized for Apple Silicon with MLX
 - **Streaming Pipeline**: TTS starts before LLM finishes for lower latency
-- **Barge-in Support**: Interrupt the assistant while it's speaking
-- **GPU Accelerated**: MPS (Metal) acceleration for TTS
+- **Personal Context**: RAG-powered retrieval from your notes
+- **GPU Accelerated**: MPS (Metal) acceleration for TTS and VAD
 
 ## Architecture
 
@@ -31,6 +31,7 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 | Language Model | Qwen 2.5 7B 4-bit (via MLX) |
 | Text-to-Speech | Kokoro (28 voices) |
 | Voice Detection | Silero VAD |
+| Context Retrieval | Sentence-Transformers (all-MiniLM-L6-v2) |
 
 ## Requirements
 
@@ -78,16 +79,25 @@ voice-chatbot/
 │   │   ├── capture.py      # Microphone input (16kHz)
 │   │   ├── playback.py     # Speaker output (24kHz)
 │   │   ├── vad.py          # Voice activity detection
-│   │   └── vad_singleton.py # Shared VAD model instance
+│   │   ├── vad_singleton.py # Shared VAD model instance
+│   │   └── post_processor.py # Audio post-processing
 │   ├── models/             # ML model wrappers
 │   │   ├── stt.py          # Whisper wrapper
 │   │   ├── llm.py          # Qwen/LLM wrapper
-│   │   └── tts.py          # Kokoro wrapper
+│   │   ├── tts.py          # Kokoro wrapper
+│   │   └── rag.py          # RAG retrieval (sentence-transformers)
+│   ├── processing/         # Text and speed processing
+│   │   ├── text_preprocessor.py  # Prosody enhancement for TTS
+│   │   └── speed_controller.py   # Emotion-aware speech pacing
 │   ├── pipeline/           # Orchestration
 │   │   └── manager.py      # Main pipeline controller
 │   └── main.py             # Entry point
 ├── config/
 │   └── settings.py         # Configuration
+├── scripts/                # Evaluation and testing tools
+│   ├── tts_quality_test.py
+│   └── eval_responses.py
+├── data/                   # Personal notes for RAG
 ├── requirements.txt
 └── README.md
 ```
@@ -100,10 +110,10 @@ Edit `config/settings.py` to customize behavior. Key settings:
 |----------|---------|---------|-------------|
 | Audio | `sample_rate` | 16000 | Capture rate (Hz) |
 | VAD | `threshold` | 0.5 | Speech detection sensitivity |
-| VAD | `min_silence_duration_ms` | 500 | Silence to end turn |
+| VAD | `min_silence_duration_ms` | 300 | Silence to end turn |
 | LLM | `max_tokens` | 256 | Max response length |
-| LLM | `temperature` | 0.7 | Response creativity |
-| TTS | `voice` | `af_bella` | Default voice |
+| LLM | `temperature` | 0.85 | Response creativity |
+| TTS | `voice` | `af_heart` | Default voice |
 | TTS | `speed` | 1.0 | Speech rate multiplier |
 
 ## Available Voices
@@ -113,8 +123,8 @@ Kokoro provides 28 English voices with quality ratings:
 **American Female (11 voices)**
 | Voice | Grade | Description |
 |-------|-------|-------------|
-| `af_heart` | A | Highest quality, natural |
-| `af_bella` | A- | Warm, friendly (default) |
+| `af_heart` | A | Highest quality, natural (default) |
+| `af_bella` | A- | Warm, friendly |
 | `af_nicole` | B- | Soft, calm |
 | `af_sarah` | C+ | Clear, professional |
 | `af_aoede` `af_kore` `af_nova` `af_alloy` `af_sky` `af_jessica` `af_river` | C-D | Additional options |

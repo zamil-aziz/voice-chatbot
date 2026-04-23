@@ -10,6 +10,7 @@ from collections import deque
 from rich.console import Console
 
 from .vad_singleton import get_vad_model
+from config.settings import settings
 
 console = Console()
 
@@ -55,7 +56,7 @@ class VoiceActivityDetector:
         self.prob_history = deque(maxlen=10)
 
         # Use shared VAD model singleton (includes device for GPU acceleration)
-        self.model, self.get_speech_timestamps, self.device = get_vad_model()
+        self.model, self.get_speech_timestamps, self.device = get_vad_model(settings.vad.device)
 
     def get_speech_probability(self, audio_chunk: np.ndarray) -> float:
         """

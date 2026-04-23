@@ -9,9 +9,9 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 - **Privacy First**: Your conversations never leave your machine
 - **Natural Voice**: 28 high-quality voices with Kokoro TTS
 - **Fast**: Optimized for Apple Silicon with MLX
-- **Streaming Pipeline**: TTS starts before LLM finishes for lower latency
+- **Streaming Pipeline**: LLM generation and TTS synthesis overlap for lower latency
 - **Personal Context**: RAG-powered retrieval from your notes
-- **GPU Accelerated**: MPS (Metal) acceleration for TTS and VAD
+- **Apple Silicon Ready**: MLX acceleration for STT/LLM with isolated Kokoro TTS
 
 ## Architecture
 
@@ -28,7 +28,7 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 | Component | Technology |
 |-----------|------------|
 | Speech-to-Text | Whisper Large-v3-turbo (via MLX) |
-| Language Model | Qwen 2.5 7B 4-bit (via MLX) |
+| Language Model | Qwen 3 4B Instruct 4-bit (via MLX) |
 | Text-to-Speech | Kokoro (28 voices) |
 | Voice Detection | Silero VAD |
 | Context Retrieval | Sentence-Transformers (all-MiniLM-L6-v2) |
@@ -68,6 +68,13 @@ python -m src.main --test-llm   # Test language model
 python -m src.main --test-tts   # Test text-to-speech
 python -m src.main --test-vad   # Test voice activity detection
 python -m src.main --test-all   # Test all components
+```
+
+### Benchmark Latency
+```bash
+python -m scripts.benchmark_latency --llm
+python -m scripts.benchmark_latency --tts
+python -m scripts.benchmark_latency --all
 ```
 
 ## Project Structure
@@ -111,10 +118,14 @@ Edit `config/settings.py` to customize behavior. Key settings:
 | Audio | `sample_rate` | 16000 | Capture rate (Hz) |
 | VAD | `threshold` | 0.5 | Speech detection sensitivity |
 | VAD | `min_silence_duration_ms` | 300 | Silence to end turn |
-| LLM | `max_tokens` | 256 | Max response length |
-| LLM | `temperature` | 0.85 | Response creativity |
+| LLM | `model_name` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Default local chat model |
+| LLM | `max_tokens` | 96 | Max response length for voice mode |
+| LLM | `temperature` | 0.7 | Response creativity |
+| LLM | `top_p` / `top_k` | `0.8` / `20` | Qwen3 non-thinking sampling defaults |
 | TTS | `voice` | `af_heart` | Default voice |
 | TTS | `speed` | 1.0 | Speech rate multiplier |
+| TTS | `device` | `cpu` | Kokoro device; CPU avoids GPU contention with MLX |
+| TTS | `isolated_process` | `true` | Runs Kokoro outside the main process to avoid native shutdown crashes |
 
 ## Available Voices
 
@@ -157,7 +168,7 @@ Kokoro provides 28 English voices with quality ratings:
 
 | Metric | Typical Value |
 |--------|---------------|
-| First audio output | ~2-3 seconds after speaking |
+| First audio output | Target: <=2 seconds p50 after speech end |
 | Memory usage | 8-12 GB RAM |
 | Disk space (models) | ~15 GB |
 | Models load time | ~30-60 seconds (first run downloads) |

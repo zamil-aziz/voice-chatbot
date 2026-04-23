@@ -4,15 +4,152 @@ Produces realistic, natural-sounding speech.
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import itertools
+import multiprocessing as mp
+import os
+import queue
+import traceback
 from typing import Optional, List, Tuple, Union
 import numpy as np
 
 from rich.console import Console
 
-from config.settings import settings
-
 console = Console()
+
+
+def _resolve_tts_device(preferred_device: str) -> str:
+    import torch
+
+    if preferred_device == "auto":
+        return "mps" if torch.backends.mps.is_available() else "cpu"
+    if preferred_device == "mps" and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _audio_to_numpy(audio_chunk):
+    if hasattr(audio_chunk, "numpy"):
+        return audio_chunk.numpy()
+    if hasattr(audio_chunk, "__array__"):
+        return np.asarray(audio_chunk)
+    return audio_chunk
+
+
+def _create_blended_voice_tensor(
+    pipeline,
+    voice_blend: Optional[List[Tuple[str, float]]],
+    known_voices: Optional[dict[str, str]] = None,
+):
+    """Create a voice blend tensor, skipping invalid blend entries."""
+    if not voice_blend:
+        return None
+
+    console.print(f"[dim]Creating voice blend: {voice_blend}[/dim]")
+
+    tensors = []
+    weights = []
+    voice_names = []
+
+    for voice_name, weight in voice_blend:
+        if known_voices is not None and voice_name not in known_voices:
+            console.print(f"[yellow]Warning: Unknown voice '{voice_name}' in blend[/yellow]")
+            continue
+        try:
+            tensors.append(pipeline.load_voice(voice_name))
+            weights.append(weight)
+            voice_names.append(voice_name)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not load voice '{voice_name}': {e}[/yellow]")
+
+    if len(tensors) < 2:
+        console.print("[yellow]Voice blend requires at least 2 voices, using default[/yellow]")
+        return None
+
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        console.print("[yellow]Voice blend weights must be positive, using default[/yellow]")
+        return None
+
+    normalized_weights = [weight / total_weight for weight in weights]
+    blended = sum(
+        tensor * normalized_weight
+        for tensor, normalized_weight in zip(tensors, normalized_weights)
+    )
+
+    voice_desc = ", ".join(
+        f"{voice_name}:{weight:.0%}"
+        for voice_name, weight in zip(voice_names, normalized_weights)
+    )
+    console.print(f"[green]Voice blend created: {voice_desc}[/green]")
+    return blended
+
+
+def _tts_worker_main(
+    request_queue,
+    response_queue,
+    voice: str,
+    speed: float,
+    voice_blend: Optional[List[Tuple[str, float]]],
+    device: str,
+) -> None:
+    """Run Kokoro in an isolated process to avoid native shutdown crashes."""
+    request_id = None
+    try:
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+        from kokoro import KPipeline
+
+        lang_code = voice[0]
+        resolved_device = _resolve_tts_device(device)
+        pipeline = KPipeline(lang_code=lang_code, device=resolved_device)
+
+        blended_voice = None
+        if voice_blend:
+            blended_voice = _create_blended_voice_tensor(
+                pipeline,
+                voice_blend,
+                TextToSpeech.VOICES,
+            )
+
+        response_queue.put(("ready", resolved_device))
+
+        while True:
+            request = request_queue.get()
+            command = request[0]
+            if command == "close":
+                break
+
+            if command != "synthesize":
+                continue
+
+            _, request_id, text, request_speed = request
+            use_speed = request_speed if request_speed is not None else speed
+            selected_voice = blended_voice if blended_voice is not None else voice
+
+            for graphemes, phonemes, audio_chunk in pipeline(
+                text,
+                voice=selected_voice,
+                speed=use_speed,
+            ):
+                response_queue.put((
+                    "chunk",
+                    request_id,
+                    graphemes,
+                    phonemes,
+                    _audio_to_numpy(audio_chunk),
+                ))
+            response_queue.put(("done", request_id))
+    except BaseException:
+        response_queue.put(("error", request_id, traceback.format_exc()))
+    finally:
+        # Kokoro imports sentencepiece, whose Abseil flag cleanup can SIGBUS on
+        # this macOS/Python combination. Exit directly so the parent stays clean.
+        try:
+            response_queue.close()
+            response_queue.join_thread()
+        except Exception:
+            pass
+        os._exit(0)
 
 
 class TextToSpeech:
@@ -60,14 +197,73 @@ class TextToSpeech:
         speed: float = 1.0,
         sample_rate: int = 24000,
         voice_blend: Optional[List[Tuple[str, float]]] = None,
+        device: str = "cpu",
+        isolated: bool = True,
+        load_timeout: int = 300,
     ):
         self.voice = voice
         self.speed = speed
         self.sample_rate = sample_rate
         self.voice_blend = voice_blend  # e.g., [("af_bella", 0.6), ("af_heart", 0.4)]
+        self.device = device
+        self.isolated = isolated
+        self.load_timeout = load_timeout
         self.pipeline = None
         self._blended_voice_tensor = None
-        self._load_model()
+        self._request_queue = None
+        self._response_queue = None
+        self._worker_process = None
+        self._request_ids = itertools.count(1)
+        if self.isolated:
+            self._start_worker()
+        else:
+            self._load_model()
+
+    def _start_worker(self) -> None:
+        """Start the isolated Kokoro worker process."""
+        console.print(f"[yellow]Loading TTS worker (voice: {self.voice})[/yellow]")
+        start = time.time()
+        ctx = mp.get_context("spawn")
+        self._request_queue = ctx.Queue()
+        self._response_queue = ctx.Queue()
+        self._worker_process = ctx.Process(
+            target=_tts_worker_main,
+            args=(
+                self._request_queue,
+                self._response_queue,
+                self.voice,
+                self.speed,
+                self.voice_blend,
+                self.device,
+            ),
+            daemon=True,
+        )
+        self._worker_process.start()
+
+        deadline = time.time() + self.load_timeout
+        while True:
+            if time.time() > deadline:
+                self.close()
+                raise RuntimeError(f"TTS worker loading timed out after {self.load_timeout}s")
+            if not self._worker_process.is_alive():
+                exitcode = self._worker_process.exitcode
+                self.close()
+                raise RuntimeError(f"TTS worker exited before ready (exit code {exitcode})")
+            try:
+                message = self._response_queue.get(timeout=0.1)
+                break
+            except queue.Empty:
+                continue
+
+        if message[0] == "error":
+            self.close()
+            raise RuntimeError(f"TTS worker failed to load:\n{message[2]}")
+        if message[0] != "ready":
+            self.close()
+            raise RuntimeError(f"Unexpected TTS worker response: {message}")
+
+        resolved_device = message[1]
+        console.print(f"[green]TTS worker ready on {resolved_device.upper()} in {time.time() - start:.2f}s[/green]")
 
     def _load_model(self) -> None:
         """Load Kokoro TTS model with timeout."""
@@ -86,8 +282,12 @@ class TextToSpeech:
             # 'a' = American English, 'b' = British English
             lang_code = self.voice[0]  # 'a' or 'b'
 
-            # Use MPS (Metal) for GPU acceleration on Apple Silicon
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if self.device == "auto":
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+            elif self.device == "mps" and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
 
             try:
                 pipeline = KPipeline(lang_code=lang_code, device=device)
@@ -101,9 +301,8 @@ class TextToSpeech:
                 raise
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(do_load)
-                self.pipeline = future.result(timeout=settings.model_load_timeout)
+            # Kokoro/PyTorch model construction is safer on the main thread on macOS.
+            self.pipeline = do_load()
 
             # Create blended voice if configured
             if self.voice_blend:
@@ -111,10 +310,6 @@ class TextToSpeech:
 
             console.print(
                 f"[green]TTS ready in {time.time() - start:.2f}s[/green]"
-            )
-        except FuturesTimeoutError:
-            raise RuntimeError(
-                f"TTS model loading timed out after {settings.model_load_timeout}s"
             )
         except ImportError as e:
             console.print(f"[red]Failed to import kokoro: {e}[/red]")
@@ -128,46 +323,11 @@ class TextToSpeech:
         Voice blending allows mixing characteristics from different voices
         to create unique, more expressive voice profiles.
         """
-        import torch
-
-        if not self.voice_blend or len(self.voice_blend) == 0:
-            return
-
-        console.print(f"[dim]Creating voice blend: {self.voice_blend}[/dim]")
-
-        tensors = []
-        weights = []
-
-        for voice_name, weight in self.voice_blend:
-            if voice_name not in self.VOICES:
-                console.print(f"[yellow]Warning: Unknown voice '{voice_name}' in blend[/yellow]")
-                continue
-            try:
-                # Load voice tensor using Kokoro's internal method
-                # Kokoro stores voice tensors that can be averaged
-                voice_tensor = self.pipeline.load_voice(voice_name)
-                tensors.append(voice_tensor)
-                weights.append(weight)
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not load voice '{voice_name}': {e}[/yellow]")
-
-        if len(tensors) < 2:
-            console.print("[yellow]Voice blend requires at least 2 voices, using default[/yellow]")
-            return
-
-        # Normalize weights
-        total_weight = sum(weights)
-        normalized_weights = [w / total_weight for w in weights]
-
-        # Weighted blend of voice tensors
-        blended = sum(t * w for t, w in zip(tensors, normalized_weights))
-        self._blended_voice_tensor = blended
-
-        voice_desc = ", ".join(f"{v}:{w:.0%}" for v, w in zip(
-            [vb[0] for vb in self.voice_blend],
-            normalized_weights
-        ))
-        console.print(f"[green]Voice blend created: {voice_desc}[/green]")
+        self._blended_voice_tensor = _create_blended_voice_tensor(
+            self.pipeline,
+            self.voice_blend,
+            self.VOICES,
+        )
 
     def _get_voice_for_synthesis(self) -> Union[str, "torch.Tensor"]:
         """Get the voice to use for synthesis (blended tensor or voice name)."""
@@ -186,27 +346,15 @@ class TextToSpeech:
         Returns:
             Tuple of (audio samples as float32 numpy array, sample rate)
         """
-        if self.pipeline is None:
+        if not self.isolated and self.pipeline is None:
             raise RuntimeError("Model not loaded")
 
         start = time.time()
         use_speed = speed if speed is not None else self.speed
 
-        # Generate audio (use blended voice if available)
-        generator = self.pipeline(
-            text,
-            voice=self._get_voice_for_synthesis(),
-            speed=use_speed,
-        )
-
         # Collect all audio chunks (convert tensors to numpy)
         audio_chunks = []
-        for _, _, audio_chunk in generator:
-            # Kokoro returns tensors, convert to numpy
-            if hasattr(audio_chunk, 'numpy'):
-                audio_chunk = audio_chunk.numpy()
-            elif hasattr(audio_chunk, '__array__'):
-                audio_chunk = np.asarray(audio_chunk)
+        for _, _, audio_chunk in self.synthesize_stream(text, speed=use_speed):
             audio_chunks.append(audio_chunk)
 
         # Concatenate all chunks
@@ -236,10 +384,14 @@ class TextToSpeech:
         Yields:
             Tuples of (graphemes, phonemes, audio_chunk)
         """
-        if self.pipeline is None:
+        if not self.isolated and self.pipeline is None:
             raise RuntimeError("Model not loaded")
 
         use_speed = speed if speed is not None else self.speed
+
+        if self.isolated:
+            yield from self._synthesize_stream_worker(text, use_speed)
+            return
 
         start = time.time()
         first_chunk_time = None
@@ -256,10 +408,7 @@ class TextToSpeech:
                 first_chunk_time = time.time() - start
 
             # Convert tensor to numpy if needed
-            if hasattr(audio_chunk, 'numpy'):
-                audio_chunk = audio_chunk.numpy()
-            elif hasattr(audio_chunk, '__array__'):
-                audio_chunk = np.asarray(audio_chunk)
+            audio_chunk = _audio_to_numpy(audio_chunk)
 
             total_audio_samples += len(audio_chunk)
             yield graphemes, phonemes, audio_chunk
@@ -268,6 +417,52 @@ class TextToSpeech:
         total_time = time.time() - start
         audio_duration = total_audio_samples / self.sample_rate if total_audio_samples > 0 else 0
         rtf = total_time / audio_duration if audio_duration > 0 else 0  # Real-time factor
+        console.print(
+            f"[dim]TTS detail: first={first_chunk_time*1000:.0f}ms, "
+            f"{chunk_count} chunks, {audio_duration:.2f}s audio, "
+            f"RTF={rtf:.2f}x[/dim]"
+        )
+
+    def _synthesize_stream_worker(self, text: str, speed: Optional[float] = None):
+        """Request streamed audio from the isolated Kokoro worker."""
+        if not self._worker_process or not self._worker_process.is_alive():
+            raise RuntimeError("TTS worker is not running")
+
+        request_id = next(self._request_ids)
+        self._request_queue.put(("synthesize", request_id, text, speed))
+
+        start = time.time()
+        first_chunk_time = None
+        chunk_count = 0
+        total_audio_samples = 0
+
+        while True:
+            try:
+                message = self._response_queue.get(timeout=1.0)
+            except queue.Empty:
+                if not self._worker_process.is_alive():
+                    raise RuntimeError("TTS worker exited unexpectedly")
+                continue
+
+            message_type = message[0]
+            if message_type == "error":
+                raise RuntimeError(f"TTS worker error:\n{message[2]}")
+            if message_type == "done" and message[1] == request_id:
+                break
+            if message_type != "chunk" or message[1] != request_id:
+                continue
+
+            _, _, graphemes, phonemes, audio_chunk = message
+            chunk_count += 1
+            if first_chunk_time is None:
+                first_chunk_time = time.time() - start
+            total_audio_samples += len(audio_chunk)
+            yield graphemes, phonemes, audio_chunk
+
+        total_time = time.time() - start
+        audio_duration = total_audio_samples / self.sample_rate if total_audio_samples > 0 else 0
+        rtf = total_time / audio_duration if audio_duration > 0 else 0
+        first_chunk_time = first_chunk_time or 0
         console.print(
             f"[dim]TTS detail: first={first_chunk_time*1000:.0f}ms, "
             f"{chunk_count} chunks, {audio_duration:.2f}s audio, "
@@ -295,13 +490,17 @@ class TextToSpeech:
 
         self.voice = voice
 
-        if old_lang != new_lang:
-            console.print(f"[yellow]Switching language, reloading model...[/yellow]")
+        if self.isolated:
+            console.print("[yellow]Switching voice, restarting TTS worker...[/yellow]")
+            self.close()
+            self._start_worker()
+        elif old_lang != new_lang:
+            console.print("[yellow]Switching language, reloading model...[/yellow]")
             self._load_model()
 
     def warmup(self) -> None:
         """Warm up TTS to avoid cold-start latency on first real synthesis."""
-        if self.pipeline is None:
+        if not self.isolated and self.pipeline is None:
             return
 
         console.print("[dim]Warming up TTS...[/dim]")
@@ -311,6 +510,27 @@ class TextToSpeech:
             pass
         elapsed = time.time() - start
         console.print(f"[dim]TTS warm-up done in {elapsed:.2f}s[/dim]")
+
+    def close(self) -> None:
+        """Stop the isolated TTS worker if one is running."""
+        if self._worker_process is None:
+            return
+        if self._worker_process.is_alive():
+            try:
+                self._request_queue.put(("close",))
+                self._worker_process.join(timeout=2.0)
+            except Exception:
+                pass
+        if self._worker_process.is_alive():
+            self._worker_process.terminate()
+            self._worker_process.join(timeout=2.0)
+        self._worker_process = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # Quick test

@@ -7,7 +7,7 @@ A fully local, privacy-respecting voice assistant running on Apple Silicon.
 
 Components:
 - STT: Whisper (via MLX)
-- LLM: Llama 3.1 8B (via MLX)
+- LLM: Qwen 3 4B Instruct (via MLX)
 - TTS: Kokoro
 - VAD: Silero
 
@@ -56,7 +56,7 @@ def test_stt():
 
 def test_llm():
     """Test language model component."""
-    console.print(Panel("[bold]Testing Language Model (Llama 3.1 8B)[/bold]"))
+    console.print(Panel("[bold]Testing Language Model (Qwen via MLX)[/bold]"))
 
     from .models import LanguageModel
 

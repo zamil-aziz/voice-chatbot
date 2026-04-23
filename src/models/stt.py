@@ -62,7 +62,7 @@ class SpeechToText:
     def _load_vad(self) -> None:
         """Load shared Silero VAD model for silence trimming."""
         try:
-            self.vad_model, self.get_speech_timestamps, self.vad_device = get_vad_model()
+            self.vad_model, self.get_speech_timestamps, self.vad_device = get_vad_model(settings.vad.device)
         except Exception as e:
             console.print(f"[yellow]VAD for trimming not available: {e}[/yellow]")
             self.vad_model = None

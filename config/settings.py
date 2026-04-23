@@ -22,6 +22,7 @@ class VADSettings(BaseModel):
     min_speech_duration_ms: int = 250  # Minimum speech duration
     min_silence_duration_ms: int = 300  # Silence before end-of-turn (reduced from 500ms for faster response)
     window_size_samples: int = 512  # Silero VAD window size
+    device: Literal["auto", "cpu", "mps"] = "cpu"  # CPU is faster for tiny 512-sample chunks
 
 
 class STTSettings(BaseModel):
@@ -33,28 +34,25 @@ class STTSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     """Language Model settings."""
-    model_name: str = "mlx-community/Qwen2.5-7B-Instruct-4bit"
-    max_tokens: int = 256
-    temperature: float = 0.85
-    system_prompt: str = """You're Maya, a warm friend who genuinely cares. Match the speaker's energy.
+    model_name: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    max_tokens: int = 96
+    temperature: float = 0.7
+    top_p: float = 0.8
+    top_k: int = 20
+    min_p: float = 0.0
+    history_turns: int = 4
+    enable_thinking: bool = False
+    system_prompt: str = """You're Maya, a warm, concise voice assistant.
 
 Response rules:
-- 1-2 sentences max (spoken aloud)
-- Use contractions (you're, I'm, that's)
-- Start naturally with "Well", "Yeah", "So" - never use filler sounds like "Oh", "Hmm", "Um", "Ah"
+- Keep answers to one or two natural spoken sentences unless the user asks for detail.
+- Use contractions and everyday language.
+- Match the user's mood without forcing the same opener every time.
+- For emotions, acknowledge the feeling first, then offer one helpful thought or question.
+- For facts, answer directly and briefly.
 
-Formatting (CRITICAL - spoken aloud):
-- Spell out numbers: "twenty-three" not "23"
-- Spell out abbreviations: "Doctor" not "Dr."
-- Currency in words: "fifty dollars" not "$50"
-
-Emotional warmth:
-- Acknowledge feelings first: "That's rough..." or "That's amazing!"
-- React like a friend: surprise, delight, concern
-
-Never say: "Certainly!", "Absolutely!", "I'd be happy to", "As an AI", "Is there anything else?"
-
-Sound like a real person, not a customer service bot."""
+Never say: "Certainly", "Absolutely", "I'd be happy to", "As an AI", "Is there anything else?"
+Do not use markdown, bullet points, code blocks, emojis, or stage directions."""
 
 
 class VoiceBlendConfig(BaseModel):
@@ -65,15 +63,15 @@ class VoiceBlendConfig(BaseModel):
 
 class TextProcessingSettings(BaseModel):
     """Text preprocessing settings for TTS prosody enhancement."""
-    enabled: bool = False  # Disabled - raw Kokoro sounds better
+    enabled: bool = True  # Enable deterministic TTS-safe text normalization
     expand_interjections: bool = True  # Keep enabled - fixes TTS bug with rushed "Oh", "Hmm"
     add_breathing_pauses: bool = False  # Disabled - degrades quality
     add_emphasis_markers: bool = False  # Disabled - degrades quality
     # TTS normalization settings (disabled - LLM handles formatting)
-    expand_abbreviations: bool = False  # LLM writes "Doctor" not "Dr."
-    replace_symbols: bool = False  # LLM writes "and" not "&"
-    format_currency: bool = False  # LLM writes "fifty dollars" not "$50"
-    format_phone_numbers: bool = False  # LLM formats phone numbers
+    expand_abbreviations: bool = False  # Avoid unsafe rewrites like "in." -> "inches"
+    replace_symbols: bool = True
+    format_currency: bool = False  # Disabled until comma-formatted amounts are safely normalized
+    format_phone_numbers: bool = True
 
 
 class SpeedControlSettings(BaseModel):
@@ -106,6 +104,8 @@ class TTSSettings(BaseModel):
     """Text-to-Speech settings."""
     voice: str = "af_heart"  # Highest quality voice [A grade]
     speed: float = 1.0
+    device: Literal["auto", "cpu", "mps"] = "cpu"  # Avoid MLX/PyTorch GPU contention during streaming
+    isolated_process: bool = True  # Avoid native sentencepiece/Kokoro shutdown crashes in main process
     # Voice blending: mix multiple voices for unique characteristics
     voice_blend: Optional[List[VoiceBlendConfig]] = None
     # Processing stages for natural speech

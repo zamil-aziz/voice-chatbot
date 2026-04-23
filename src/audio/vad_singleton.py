@@ -19,7 +19,7 @@ _load_lock = threading.Lock()
 _is_loaded = False
 
 
-def get_vad_model() -> Tuple[any, Callable, str]:
+def get_vad_model(preferred_device: str = "cpu") -> Tuple[any, Callable, str]:
     """
     Get the shared Silero VAD model and utility functions.
 
@@ -49,8 +49,12 @@ def get_vad_model() -> Tuple[any, Callable, str]:
 
             import torch
 
-            # Use MPS (Metal) for GPU acceleration on Apple Silicon
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if preferred_device == "auto":
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+            elif preferred_device == "mps" and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
 
             model, utils = torch.hub.load(
                 repo_or_dir="snakers4/silero-vad",

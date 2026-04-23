@@ -7,6 +7,7 @@ import json
 import re
 import time
 import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from datetime import datetime
@@ -24,6 +25,102 @@ from ..processing import TextPreprocessor, DynamicSpeedController
 from config.settings import settings
 
 console = Console()
+
+
+class SentenceSegmenter:
+    """Accumulates streamed model text into TTS-friendly spoken chunks."""
+
+    SENTENCE_ENDINGS = ('.', '!', '?')
+    FIRST_CLAUSE_TRIGGERS = (',', ';', ':', ' -')
+
+    def __init__(self, first_min_chars: int = 18, first_min_words: int = 4):
+        self.buffer = ""
+        self.first_segment_emitted = False
+        self.first_min_chars = first_min_chars
+        self.first_min_words = first_min_words
+
+    def add(self, text: str) -> list[str]:
+        """Add streamed text and return zero or more complete spoken chunks."""
+        self.buffer += text
+        current = self.buffer.strip()
+        if not current:
+            return []
+
+        should_emit = current.endswith(self.SENTENCE_ENDINGS)
+        if not self.first_segment_emitted and not should_emit:
+            word_count = len(re.findall(r"\b\w+\b", current))
+            long_enough = len(current) >= self.first_min_chars and word_count >= self.first_min_words
+            if long_enough and any(current.endswith(trigger) for trigger in self.FIRST_CLAUSE_TRIGGERS):
+                should_emit = True
+
+        if not should_emit:
+            return []
+
+        self.buffer = ""
+        self.first_segment_emitted = True
+        return [current]
+
+    def flush(self) -> list[str]:
+        """Return any remaining text as a final spoken chunk."""
+        current = self.buffer.strip()
+        self.buffer = ""
+        if current:
+            self.first_segment_emitted = True
+            return [current]
+        return []
+
+
+class ThinkBlockStreamFilter:
+    """Suppress streamed text inside <think>...</think> blocks across chunks."""
+
+    THINK_TAG_RE = re.compile(r"</?\s*think\b[^>]*>", re.IGNORECASE)
+
+    def __init__(self):
+        self.in_think_block = False
+        self.pending_tag = ""
+
+    def add(self, text: str) -> str:
+        """Add streamed text and return only text that is safe to speak."""
+        output: list[str] = []
+
+        for char in text:
+            if self.pending_tag:
+                self.pending_tag += char
+                if self.THINK_TAG_RE.fullmatch(self.pending_tag):
+                    tag = self.pending_tag
+                    self.pending_tag = ""
+                    self.in_think_block = not tag.lstrip("<").startswith("/")
+                elif not self._could_be_think_tag(self.pending_tag):
+                    tag = self.pending_tag
+                    self.pending_tag = ""
+                    if not self.in_think_block:
+                        output.append(tag)
+                continue
+
+            if char == "<":
+                self.pending_tag = char
+                continue
+
+            if not self.in_think_block:
+                output.append(char)
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        """Release any incomplete non-think tag that is safe to speak."""
+        if not self.pending_tag:
+            return ""
+
+        pending = self.pending_tag
+        self.pending_tag = ""
+        if self.in_think_block or self._could_be_think_tag(pending):
+            return ""
+        return pending
+
+    @staticmethod
+    def _could_be_think_tag(text: str) -> bool:
+        lowered = text.lower()
+        return "<think>".startswith(lowered) or "</think>".startswith(lowered)
 
 
 class VoicePipeline:
@@ -145,6 +242,11 @@ class VoicePipeline:
                     model_name=settings.llm.model_name,
                     max_tokens=settings.llm.max_tokens,
                     temperature=settings.llm.temperature,
+                    top_p=settings.llm.top_p,
+                    top_k=settings.llm.top_k,
+                    min_p=settings.llm.min_p,
+                    history_turns=settings.llm.history_turns,
+                    enable_thinking=settings.llm.enable_thinking,
                     system_prompt=settings.llm.system_prompt,
                 )
             return "LLM"
@@ -162,6 +264,9 @@ class VoicePipeline:
                     voice=settings.tts.voice,
                     speed=settings.tts.speed,
                     voice_blend=voice_blend,
+                    device=settings.tts.device,
+                    isolated=settings.tts.isolated_process,
+                    load_timeout=settings.model_load_timeout,
                 )
             return "TTS"
 
@@ -226,10 +331,16 @@ class VoicePipeline:
         with open(log_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
-    def _synthesize_sentence(self, sentence: str) -> None:
+    def _synthesize_sentence(
+        self,
+        sentence: str,
+        on_first_audio: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, float]:
         """Synthesize and queue a single sentence for playback with enhancements."""
         # Step 1: Preprocess text for better prosody
         processed_sentence = self.text_preprocessor.process(sentence)
+        if not processed_sentence:
+            return {"tts_synthesis": 0.0, "audio_duration": 0.0, "chunks": 0}
 
         # Step 2: Calculate dynamic speed based on content
         speed = self.speed_controller.get_sentence_speed(
@@ -238,6 +349,10 @@ class VoicePipeline:
         )
 
         # Step 3: Synthesize with calculated speed
+        start = time.time()
+        chunks = 0
+        samples = 0
+        marked_first_audio = False
         for _, _, audio_chunk in self.tts.synthesize_stream(processed_sentence, speed=speed):
             if self._stop_event.is_set():
                 break
@@ -246,7 +361,137 @@ class VoicePipeline:
             if settings.tts.post_processing.enabled:
                 audio_chunk = self.post_processor.process(audio_chunk)
 
-            self.player.queue_audio(audio_chunk, self.tts.sample_rate)
+            chunks += 1
+            samples += len(audio_chunk)
+            if self.player.queue_audio(audio_chunk, self.tts.sample_rate) and not marked_first_audio:
+                marked_first_audio = True
+                if on_first_audio:
+                    on_first_audio()
+
+        elapsed = time.time() - start
+        audio_duration = samples / self.tts.sample_rate if self.tts and samples else 0.0
+        return {
+            "tts_synthesis": elapsed,
+            "audio_duration": audio_duration,
+            "chunks": chunks,
+        }
+
+    def _stream_response_to_speech(
+        self,
+        text: str,
+        rag_context: Optional[list[str]] = None,
+        stt_time: float = 0.0,
+        rag_time: float = 0.0,
+    ) -> tuple[str, Dict[str, float]]:
+        """Stream LLM output into a background TTS worker and collect timings."""
+        if not self.llm or not self.tts or not self.player:
+            raise RuntimeError("Pipeline models and audio player must be loaded first")
+
+        llm_start = time.time()
+        segmenter = SentenceSegmenter()
+        segment_queue: queue.Queue = queue.Queue()
+        sentinel = object()
+        response_tokens: list[str] = []
+        tts_errors: list[BaseException] = []
+        metrics_lock = threading.Lock()
+        metrics: Dict[str, float] = {
+            "stt": stt_time,
+            "rag": rag_time,
+            "llm": 0.0,
+            "llm_total": 0.0,
+            "tts": 0.0,
+            "tts_synthesis": 0.0,
+            "tts_audio_duration": 0.0,
+            "tts_chunks": 0.0,
+            "playback_drain": 0.0,
+            "first_audio": 0.0,
+            "total": 0.0,
+        }
+        first_segment_time: Optional[float] = None
+        first_tts_start: Optional[float] = None
+
+        def mark_first_audio() -> None:
+            with metrics_lock:
+                if metrics["first_audio"] == 0.0:
+                    metrics["first_audio"] = time.time() - llm_start
+
+        def tts_worker() -> None:
+            nonlocal first_tts_start
+            while not self._stop_event.is_set():
+                item = segment_queue.get()
+                if item is sentinel:
+                    segment_queue.task_done()
+                    break
+
+                sentence = item
+                try:
+                    if first_tts_start is None:
+                        first_tts_start = time.time()
+                    tts_stats = self._synthesize_sentence(sentence, on_first_audio=mark_first_audio)
+                    with metrics_lock:
+                        metrics["tts_synthesis"] += tts_stats["tts_synthesis"]
+                        metrics["tts_audio_duration"] += tts_stats["audio_duration"]
+                        metrics["tts_chunks"] += tts_stats["chunks"]
+                except BaseException as exc:
+                    tts_errors.append(exc)
+                    break
+                finally:
+                    segment_queue.task_done()
+
+        self.player.start_streaming()
+        worker = threading.Thread(target=tts_worker, daemon=True)
+        worker.start()
+        think_filter = ThinkBlockStreamFilter()
+
+        def enqueue_spoken_segment(raw_segment: str) -> None:
+            nonlocal first_segment_time
+            segment = self.llm.clean_response_text(raw_segment)
+            if not segment:
+                return
+            if first_segment_time is None:
+                first_segment_time = time.time()
+                metrics["llm"] = first_segment_time - llm_start
+                console.print(f"[dim]LLM first chunk: {metrics['llm']:.2f}s[/dim]")
+            segment_queue.put(segment)
+
+        try:
+            for token in self.llm.generate_stream(text, context=rag_context):
+                if self._stop_event.is_set():
+                    break
+
+                response_tokens.append(token)
+                spoken_text = think_filter.add(token)
+                if not spoken_text:
+                    continue
+                for segment in segmenter.add(spoken_text):
+                    enqueue_spoken_segment(segment)
+
+            remaining_text = think_filter.flush()
+            if remaining_text:
+                for segment in segmenter.add(remaining_text):
+                    enqueue_spoken_segment(segment)
+            for segment in segmenter.flush():
+                enqueue_spoken_segment(segment)
+        finally:
+            metrics["llm_total"] = time.time() - llm_start
+            segment_queue.put(sentinel)
+            worker.join(timeout=60.0)
+
+            playback_start = time.time()
+            self.player.stop_streaming()
+            metrics["playback_drain"] = time.time() - playback_start
+
+        if tts_errors:
+            raise tts_errors[0]
+
+        total_end = time.time()
+        metrics["total"] = stt_time + (total_end - llm_start)
+        if first_tts_start is not None:
+            metrics["tts"] = total_end - first_tts_start
+        metrics.update({f"llm_{k}": v for k, v in self.llm.last_stream_stats.items()})
+
+        response = self.llm.clean_response_text("".join(response_tokens))
+        return response, metrics
 
     def process_text(self, text: str) -> None:
         """
@@ -265,7 +510,9 @@ class VoicePipeline:
 
             # Retrieve relevant context from RAG (excluding already-mentioned notes)
             rag_context = []
+            rag_time = 0.0
             if self.rag:
+                rag_start = time.time()
                 user_name = self._extract_user_name()
                 rag_context, used_indices = self.rag.search(
                     text,
@@ -274,73 +521,23 @@ class VoicePipeline:
                     exclude_indices=self._used_note_indices,
                 )
                 self._used_note_indices.update(used_indices)
+                rag_time = time.time() - rag_start
 
             # Stream LLM → TTS
             console.print("[cyan]Thinking...[/cyan]")
-            llm_start = time.time()
-            tts_start = None
-            first_audio_time = None
-
-            # Start audio streaming
-            self.player.start_streaming()
-
-            # Buffer for accumulating LLM tokens until sentence boundary
-            sentence_tokens: list = []
-            response_tokens: list = []
-            sentence_endings = ('.', '!', '?')
-
-            for token in self.llm.generate_stream(text, context=rag_context):
-                if self._stop_event.is_set():
-                    break
-
-                response_tokens.append(token)
-                sentence_tokens.append(token)
-
-                # Check for sentence boundary
-                token_stripped = token.rstrip()
-                if token_stripped and token_stripped[-1] in sentence_endings:
-                    sentence = ''.join(sentence_tokens).strip()
-                    if sentence:
-                        if tts_start is None:
-                            tts_start = time.time()
-                            llm_time = tts_start - llm_start
-                            console.print(f"[dim]LLM first sentence: {llm_time:.2f}s[/dim]")
-
-                        self._synthesize_sentence(sentence)
-
-                        if first_audio_time is None:
-                            first_audio_time = time.time() - llm_start
-
-                    sentence_tokens = []
-
-            # Handle any remaining text
-            remaining = ''.join(sentence_tokens).strip()
-            if remaining:
-                if tts_start is None:
-                    tts_start = time.time()
-                    llm_time = tts_start - llm_start
-                self._synthesize_sentence(remaining)
-
-            full_response = ''.join(response_tokens)
-
-            self.player.stop_streaming()
-
-            # Calculate timing
-            total_end = time.time()
-            if tts_start is None:
-                tts_start = llm_start
-                llm_time = 0
-            tts_time = total_end - tts_start
-
-            response = full_response.strip()
+            response, timing = self._stream_response_to_speech(
+                text,
+                rag_context=rag_context,
+                rag_time=rag_time,
+            )
             console.print(f"[bold green]Assistant:[/bold green] {response}")
 
             # Log timing
-            total_time = total_end - llm_start
             console.print(
-                f"[dim]Timing: LLM={llm_time:.2f}s, TTS={tts_time:.2f}s, "
-                f"Total={total_time:.2f}s"
-                + (f", First audio={first_audio_time:.2f}s" if first_audio_time else "")
+                f"[dim]Timing: RAG={timing['rag']:.2f}s, "
+                f"LLM first={timing['llm']:.2f}s, LLM total={timing['llm_total']:.2f}s, "
+                f"TTS={timing['tts']:.2f}s, Total={timing['total']:.2f}s"
+                + (f", First audio={timing['first_audio']:.2f}s" if timing["first_audio"] else "")
                 + "[/dim]"
             )
 
@@ -376,8 +573,10 @@ class VoicePipeline:
 
             # Start RAG search in background while we prepare LLM
             rag_future = None
+            rag_start = None
             if self.rag:
                 user_name = self._extract_user_name()
+                rag_start = time.time()
                 rag_future = self._executor.submit(
                     self.rag.search,
                     text,
@@ -389,99 +588,34 @@ class VoicePipeline:
 
             # Step 2 & 3: Stream LLM → TTS (overlapped for lower latency)
             console.print("[cyan]Thinking...[/cyan]")
-            llm_start = time.time()
-            tts_start = None
-            first_audio_time = None
-
-            # Start audio streaming
-            self.player.start_streaming()
 
             # Get RAG results (should be ready by now or very soon)
             rag_context = []
+            rag_time = 0.0
             if rag_future:
                 try:
                     rag_context, used_indices = rag_future.result(timeout=0.2)  # Max 200ms wait
                     self._used_note_indices.update(used_indices)
+                    if rag_start is not None:
+                        rag_time = time.time() - rag_start
                 except Exception:
                     pass  # Skip RAG if too slow
 
-            # Buffer for accumulating LLM tokens until sentence boundary
-            # Using lists for efficient accumulation (avoids string concat overhead)
-            sentence_tokens: list = []
-            response_tokens: list = []
-            sentence_endings = ('.', '!', '?')
-            # Clause triggers for faster first audio (comma, semicolon, colon, dash)
-            clause_triggers = (',', ';', ':', ' -')
-            min_clause_chars = 10  # Minimum chars before clause trigger applies (reduced for faster first audio)
-            first_audio_started = False
-
-            for token in self.llm.generate_stream(text, context=rag_context):
-                if self._stop_event.is_set():
-                    break
-
-                response_tokens.append(token)
-                sentence_tokens.append(token)
-
-                # Check for sentence boundary (check token directly, not full buffer)
-                token_stripped = token.rstrip()
-                current_text = ''.join(sentence_tokens).strip()
-
-                # Determine if we should trigger TTS
-                should_trigger = token_stripped and token_stripped[-1] in sentence_endings
-
-                # For first audio only: also trigger on clause boundaries for faster response
-                if not first_audio_started and not should_trigger and len(current_text) >= min_clause_chars:
-                    if any(current_text.endswith(trigger) for trigger in clause_triggers):
-                        should_trigger = True
-
-                if should_trigger:
-                    sentence = current_text
-                    if sentence:
-                        # First sentence/clause: record time to first audio
-                        if tts_start is None:
-                            tts_start = time.time()
-                            llm_time = tts_start - llm_start
-                            console.print(f"[dim]LLM first chunk: {llm_time:.2f}s[/dim]")
-
-                        # Synthesize this sentence/clause immediately
-                        self._synthesize_sentence(sentence)
-                        first_audio_started = True
-
-                        if first_audio_time is None:
-                            first_audio_time = time.time() - llm_start
-
-                    sentence_tokens = []
-
-            # Handle any remaining text (incomplete sentence)
-            remaining = ''.join(sentence_tokens).strip()
-            if remaining:
-                if tts_start is None:
-                    tts_start = time.time()
-                    llm_time = tts_start - llm_start
-                self._synthesize_sentence(remaining)
-
-            full_response = ''.join(response_tokens)
-
-            self.player.stop_streaming()
-
-            # Calculate timing
-            total_end = time.time()
-            if tts_start is None:
-                tts_start = llm_start
-                llm_time = 0
-            tts_time = total_end - tts_start
-
-            response = full_response.strip()
+            response, timing = self._stream_response_to_speech(
+                text,
+                rag_context=rag_context,
+                stt_time=stt_time,
+                rag_time=rag_time,
+            )
             console.print(f"[bold green]Assistant:[/bold green] {response}")
 
             # Log timing
-            total_time = stt_time + (total_end - llm_start)
-            timing = {"stt": stt_time, "llm": llm_time, "tts": tts_time, "total": total_time}
             console.print(
                 f"[dim]Timing: STT={stt_time:.2f}s, "
-                f"LLM={llm_time:.2f}s, TTS={tts_time:.2f}s, "
-                f"Total={total_time:.2f}s"
-                + (f", First audio={first_audio_time:.2f}s" if first_audio_time else "")
+                f"RAG={timing['rag']:.2f}s, "
+                f"LLM first={timing['llm']:.2f}s, LLM total={timing['llm_total']:.2f}s, "
+                f"TTS={timing['tts']:.2f}s, Total={timing['total']:.2f}s"
+                + (f", First audio={timing['first_audio']:.2f}s" if timing["first_audio"] else "")
                 + "[/dim]"
             )
 
@@ -616,6 +750,8 @@ class VoicePipeline:
             self.capture.stop()
         if self.player:
             self.player.stop()
+        if self.tts and hasattr(self.tts, "close"):
+            self.tts.close()
 
         console.print("[green]Voice assistant stopped.[/green]")
 

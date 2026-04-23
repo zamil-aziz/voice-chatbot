@@ -4,6 +4,7 @@ Optimized for Apple Silicon with streaming support.
 """
 
 import time
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Generator, Optional, List, Dict
@@ -21,20 +22,31 @@ class LanguageModel:
 
     def __init__(
         self,
-        model_name: str = "mlx-community/Qwen2.5-7B-Instruct-4bit",
-        max_tokens: int = 256,
+        model_name: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        max_tokens: int = 96,
         temperature: float = 0.7,
+        top_p: float = 0.8,
+        top_k: int = 20,
+        min_p: float = 0.0,
+        history_turns: int = 4,
+        enable_thinking: bool = False,
         system_prompt: Optional[str] = None,
     ):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.history_turns = history_turns
+        self.enable_thinking = enable_thinking
         self.system_prompt = system_prompt or self._default_system_prompt()
 
         self.model = None
         self.tokenizer = None
         self.conversation_history: List[Dict[str, str]] = []
         self._sampler = None  # Cached sampler instance
+        self.last_stream_stats: Dict[str, float] = {}
 
         self._load_model()
 
@@ -62,7 +74,12 @@ Be natural and warm in your tone."""
                 )
 
             # Create cached sampler instance
-            self._sampler = make_sampler(temp=self.temperature)
+            self._sampler = make_sampler(
+                temp=self.temperature,
+                top_p=self.top_p,
+                min_p=self.min_p,
+                top_k=self.top_k,
+            )
 
             console.print(
                 f"[green]LLM ready in {time.time() - start:.2f}s[/green]"
@@ -86,12 +103,44 @@ Be natural and warm in your tone."""
         messages.extend(self.conversation_history)
         messages.append({"role": "user", "content": user_message})
 
-        # Apply chat template
-        return self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        template_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        if "qwen3" in self.model_name.lower():
+            template_kwargs["enable_thinking"] = self.enable_thinking
+
+        try:
+            return self.tokenizer.apply_chat_template(messages, **template_kwargs)
+        except TypeError:
+            template_kwargs.pop("enable_thinking", None)
+            return self.tokenizer.apply_chat_template(messages, **template_kwargs)
+
+    @staticmethod
+    def clean_response_text(text: str) -> str:
+        """Normalize model output for spoken playback and conversation history."""
+        text = re.sub(r"<\s*think\b[^>]*>.*?</\s*think\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<\s*think\b[^>]*>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"</?\s*think\b[^>]*>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        text = re.sub(r"`([^`]*)`", r"\1", text)
+        text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*\d+[.)]\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        text = re.sub(r"\*([^*]+)\*", r"\1", text)
+        text = re.sub(r"(?<=[.!?])\s+[-*+]\s+", " ", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _trim_history(self) -> None:
+        """Keep conversation history bounded for lower prompt-processing latency."""
+        max_messages = max(0, self.history_turns) * 2
+        if max_messages == 0:
+            self.conversation_history.clear()
+        elif len(self.conversation_history) > max_messages:
+            self.conversation_history = self.conversation_history[-max_messages:]
 
     def generate(self, user_message: str, context: Optional[List[str]] = None) -> str:
         """
@@ -134,7 +183,7 @@ User: {user_message}"""
 
         # Extract just the assistant's response
         # The generate function returns the full text, we need to strip the prompt
-        assistant_response = response.strip()
+        assistant_response = self.clean_response_text(response)
 
         elapsed = time.time() - start
         console.print(f"[dim]LLM ({elapsed:.2f}s): {assistant_response[:50]}...[/dim]")
@@ -145,9 +194,7 @@ User: {user_message}"""
             {"role": "assistant", "content": assistant_response}
         )
 
-        # Keep conversation history bounded (6 turns = 12 messages for faster inference)
-        if len(self.conversation_history) > 12:
-            self.conversation_history = self.conversation_history[-12:]
+        self._trim_history()
 
         return assistant_response
 
@@ -185,6 +232,7 @@ User: {user_message}"""
         full_response = ""
         first_token_time = None
         token_count = 0
+        last_response = None
         gen_start = time.time()
 
         for response in stream_generate(
@@ -194,33 +242,52 @@ User: {user_message}"""
             max_tokens=self.max_tokens,
             sampler=self._sampler,
         ):
+            last_response = response
+
+            # stream_generate can emit a final empty segment with finish metadata.
+            text = response.text if hasattr(response, 'text') else str(response)
+            if not text:
+                continue
+
             token_count += 1
             if first_token_time is None:
                 first_token_time = time.time() - gen_start
 
-            # stream_generate yields response objects with .text attribute
-            text = response.text if hasattr(response, 'text') else str(response)
             full_response += text
             yield text
 
         # Log detailed timing
         total_gen_time = time.time() - gen_start
         tokens_per_sec = token_count / total_gen_time if total_gen_time > 0 else 0
+        first_token_time = first_token_time or 0
+        self.last_stream_stats = {
+            "tokenize": tokenize_time,
+            "first_token": first_token_time,
+            "generation_total": total_gen_time,
+            "generation_tps": tokens_per_sec,
+            "generation_tokens": token_count,
+        }
+        if last_response is not None:
+            self.last_stream_stats.update({
+                "prompt_tokens": getattr(last_response, "prompt_tokens", 0),
+                "prompt_tps": getattr(last_response, "prompt_tps", 0.0),
+                "peak_memory_gb": getattr(last_response, "peak_memory", 0.0),
+            })
         console.print(
             f"[dim]LLM detail: tok={tokenize_time*1000:.0f}ms, "
             f"first={first_token_time*1000:.0f}ms, "
             f"{tokens_per_sec:.1f} tok/s ({token_count} tokens)[/dim]"
         )
 
+        cleaned_response = self.clean_response_text(full_response)
+
         # Update conversation history
         self.conversation_history.append({"role": "user", "content": user_message})
         self.conversation_history.append(
-            {"role": "assistant", "content": full_response.strip()}
+            {"role": "assistant", "content": cleaned_response}
         )
 
-        # Keep conversation history bounded (6 turns = 12 messages for faster inference)
-        if len(self.conversation_history) > 12:
-            self.conversation_history = self.conversation_history[-12:]
+        self._trim_history()
 
     def warmup(self) -> None:
         """Warm up the model to avoid cold-start latency on first real inference."""

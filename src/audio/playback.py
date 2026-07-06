@@ -3,6 +3,7 @@ Audio playback module for playing synthesized speech.
 """
 
 import collections
+import time
 import numpy as np
 import threading
 import queue
@@ -43,8 +44,11 @@ class AudioPlayer:
         self._stop_flag = threading.Event()
         self._playback_thread: Optional[threading.Thread] = None
         self._audio_queue: queue.Queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
-        # Ring buffer for gapless streaming playback
+        # Ring buffer for gapless streaming playback: deque of numpy chunks
+        # plus a read offset into the head chunk
         self._stream_buffer: collections.deque = collections.deque()
+        self._read_offset = 0
+        self._buffered_samples = 0
         self._buffer_lock = threading.Lock()
         self._stream_started = threading.Event()
 
@@ -88,38 +92,55 @@ class AudioPlayer:
 
         self._stop_flag.set()
         sd.stop()
-        self.is_playing = False
 
         with self._buffer_lock:
             self._stream_buffer.clear()
+            self._read_offset = 0
+            self._buffered_samples = 0
+
+        # Join the worker so a later start_streaming() never overlaps
+        # two OutputStreams on the same device
+        if self._playback_thread:
+            self._playback_thread.join(timeout=2.0)
+            self._playback_thread = None
+
+        self.is_playing = False
 
     def start_streaming(self) -> None:
         """Start background streaming playback."""
         self._stop_flag.clear()
         self._audio_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
-        self.is_playing = True  # Playing from the moment a response starts
+        # Playing from the moment a response starts until stop()/stop_streaming();
+        # a briefly drained buffer between sentences does NOT mean the response
+        # is over, so nothing else may flip this flag
+        self.is_playing = True
 
         self._stream_buffer = collections.deque()
+        self._read_offset = 0
+        self._buffered_samples = 0
         self._stream_started.clear()
 
         def stream_worker():
             import sounddevice as sd
 
             def audio_callback(outdata, frames, time_info, status):
+                out = outdata[:, 0]
+                filled = 0
                 with self._buffer_lock:
-                    available = len(self._stream_buffer)
-                    if available >= frames:
-                        # Fill output from buffer
-                        for i in range(frames):
-                            outdata[i, 0] = self._stream_buffer.popleft()
-                    elif available > 0:
-                        # Partial buffer - use what we have, pad with silence
-                        for i in range(available):
-                            outdata[i, 0] = self._stream_buffer.popleft()
-                        outdata[available:, 0] = 0
-                    else:
-                        # Buffer empty - output silence
-                        outdata[:, 0] = 0
+                    while filled < frames and self._stream_buffer:
+                        chunk = self._stream_buffer[0]
+                        take = min(frames - filled, len(chunk) - self._read_offset)
+                        out[filled:filled + take] = chunk[
+                            self._read_offset:self._read_offset + take
+                        ]
+                        filled += take
+                        self._read_offset += take
+                        if self._read_offset >= len(chunk):
+                            self._stream_buffer.popleft()
+                            self._read_offset = 0
+                    self._buffered_samples -= filled
+                if filled < frames:
+                    out[filled:] = 0
 
             # Open continuous output stream
             with sd.OutputStream(
@@ -137,8 +158,11 @@ class AudioPlayer:
                         audio, sr = self._audio_queue.get(timeout=0.1)
                         if audio is None:  # Sentinel to stop
                             # Wait for buffer to drain before exiting
-                            while len(self._stream_buffer) > 0 and not self._stop_flag.is_set():
-                                threading.Event().wait(0.05)
+                            while not self._stop_flag.is_set():
+                                with self._buffer_lock:
+                                    if self._buffered_samples <= 0:
+                                        break
+                                time.sleep(0.05)
                             break
 
                         # Add audio to ring buffer
@@ -147,15 +171,10 @@ class AudioPlayer:
                         flat_audio = audio.flatten()
 
                         with self._buffer_lock:
-                            self._stream_buffer.extend(flat_audio)
+                            self._stream_buffer.append(flat_audio)
+                            self._buffered_samples += len(flat_audio)
 
                     except queue.Empty:
-                        # Check if buffer is empty and we should stop
-                        with self._buffer_lock:
-                            if len(self._stream_buffer) == 0:
-                                self.is_playing = False
-                            else:
-                                self.is_playing = True
                         continue
 
         self._playback_thread = threading.Thread(target=stream_worker, daemon=True)
@@ -172,28 +191,37 @@ class AudioPlayer:
             sample_rate: Sample rate
 
         Returns:
-            True if queued successfully, False if queue is full
+            True if queued successfully, False if playback was stopped
         """
         sr = sample_rate or self.sample_rate
 
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
 
-        try:
-            self._audio_queue.put((audio, sr), timeout=1.0)
-            return True
-        except queue.Full:
-            console.print("[yellow]Audio queue full, dropping chunk[/yellow]")
-            return False
+        # Short put timeouts so a stopped player never blocks the caller
+        while not self._stop_flag.is_set():
+            try:
+                self._audio_queue.put((audio, sr), timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def stop_streaming(self) -> None:
         """Stop streaming playback after draining the queue."""
         # Send sentinel to signal end of stream (worker will finish current queue)
-        self._audio_queue.put((None, None))
+        try:
+            self._audio_queue.put((None, None), timeout=1.0)
+        except queue.Full:
+            pass
 
         # Wait for thread to finish playing all queued audio
         if self._playback_thread:
-            self._playback_thread.join(timeout=30.0)  # Allow time for audio to play
+            self._playback_thread.join(timeout=10.0)
+            if self._playback_thread.is_alive():
+                console.print(
+                    "[yellow]Playback worker did not stop within 10s[/yellow]"
+                )
             self._playback_thread = None
 
         # Only now set flags - audio has finished naturally

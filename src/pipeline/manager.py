@@ -435,6 +435,10 @@ class VoicePipeline:
             for token in self.llm.generate_stream(text, context=rag_context):
                 if self._stop_event.is_set():
                     break
+                if tts_errors:
+                    # TTS failed: cancel generation now instead of discovering
+                    # the error after the worker join
+                    break
 
                 response_tokens.append(token)
                 spoken_text = think_filter.add(token)

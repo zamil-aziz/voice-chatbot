@@ -24,7 +24,7 @@ dist/
 Thumbs.db
 
 # Models (downloaded on first run)
-models/
+/models/
 *.bin
 *.safetensors
 

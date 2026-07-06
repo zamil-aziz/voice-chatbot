@@ -134,36 +134,10 @@ class NotesRAG:
 
         return results
 
-    def search_with_scores(self, query: str, n_results: int = 2) -> list[tuple[str, float]]:
-        """
-        Search for relevant notes with similarity scores.
-
-        Args:
-            query: The search query
-            n_results: Maximum number of results
-
-        Returns:
-            List of (note_text, similarity) tuples (higher = more similar)
-        """
-        self._load()
-
-        if not self.notes or self.embeddings is None:
-            return []
-
-        similarities = self._similarities(query)
-        top_indices = np.argsort(similarities)[::-1][:n_results]
-
-        return [(self.notes[i], float(similarities[i])) for i in top_indices]
-
     def count(self) -> int:
         """Get the number of notes loaded."""
         self._load()
         return len(self.notes)
-
-    def list_all(self) -> list[dict]:
-        """List all notes."""
-        self._load()
-        return [{"id": f"note_{i}", "text": note} for i, note in enumerate(self.notes)]
 
 
 # Quick test
@@ -180,7 +154,7 @@ if __name__ == "__main__":
 
     for query in queries:
         console.print(f"\n[cyan]Query:[/cyan] {query}")
-        for note, score in rag.search_with_scores(query):
-            console.print(f"  [green]{score:.2f}[/green] {note}")
+        for note in rag.search(query):
+            console.print(f"  {note}")
 
     console.print(f"\n[bold]Total notes: {rag.count()}[/bold]")

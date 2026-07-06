@@ -445,35 +445,6 @@ class TextToSpeech:
 
         _log_stream_stats(start, first_chunk_time, chunk_count, total_audio_samples, self.sample_rate)
 
-    def list_voices(self) -> dict[str, str]:
-        """List available voices with descriptions."""
-        return self.VOICES
-
-    def set_voice(self, voice: str) -> None:
-        """
-        Change the voice.
-
-        Args:
-            voice: Voice identifier (e.g., 'af_bella')
-        """
-        if voice not in self.VOICES:
-            available = ", ".join(self.VOICES.keys())
-            raise ValueError(f"Unknown voice: {voice}. Available: {available}")
-
-        # Check if we need to reload (language changed)
-        old_lang = self.voice[0]
-        new_lang = voice[0]
-
-        self.voice = voice
-
-        if self.isolated:
-            console.print("[yellow]Switching voice, restarting TTS worker...[/yellow]")
-            self.close()
-            self._start_worker()
-        elif old_lang != new_lang:
-            console.print("[yellow]Switching language, reloading model...[/yellow]")
-            self._load_model()
-
     def warmup(self) -> None:
         """Warm up TTS to avoid cold-start latency on first real synthesis."""
         if not self.isolated and self.pipeline is None:
@@ -514,11 +485,6 @@ if __name__ == "__main__":
     import sounddevice as sd
 
     tts = TextToSpeech(voice="af_bella")
-
-    # List voices
-    console.print("[bold]Available voices:[/bold]")
-    for voice_id, description in tts.list_voices().items():
-        console.print(f"  {voice_id}: {description}")
 
     # Synthesize and play
     text = "Hello! I'm your AI voice assistant. How can I help you today?"

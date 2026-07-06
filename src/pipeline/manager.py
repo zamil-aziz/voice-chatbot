@@ -536,7 +536,7 @@ class VoicePipeline:
             # Skip VAD trimming since pipeline VAD already detected speech boundaries
             console.print("\n[cyan]Transcribing...[/cyan]")
             start = time.time()
-            text = self.stt.transcribe(audio, skip_vad_trim=True)
+            text = self.stt.transcribe(audio)
             stt_time = time.time() - start
 
             if not text.strip():

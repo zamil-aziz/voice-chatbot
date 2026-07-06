@@ -232,7 +232,7 @@ def benchmark_stt() -> list[dict[str, Any]]:
     for path, text, keywords in fixtures:
         audio = load_fixture_audio(path)
         start = time.time()
-        transcript = stt.transcribe(audio, skip_vad_trim=True)
+        transcript = stt.transcribe(audio)
         elapsed = time.time() - start
         lowered = transcript.lower()
         hits = [kw for kw in keywords if kw in lowered]

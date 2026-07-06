@@ -12,7 +12,6 @@ import numpy as np
 from rich.console import Console
 
 from config.settings import settings
-from ..audio.vad_singleton import get_vad_model
 
 console = Console()
 
@@ -28,10 +27,7 @@ class SpeechToText:
         self.model_name = model_name
         self.language = language
         self.model = None
-        self.vad_model = None
-        self.get_speech_timestamps = None
         self._load_model()
-        self._load_vad()
 
     def _load_model(self) -> None:
         """Load Whisper model with timeout. Downloads if not cached."""
@@ -59,47 +55,6 @@ class SpeechToText:
             console.print("[yellow]Run: pip install mlx-whisper[/yellow]")
             raise
 
-    def _load_vad(self) -> None:
-        """Load shared Silero VAD model for silence trimming."""
-        try:
-            self.vad_model, self.get_speech_timestamps, self.vad_device = get_vad_model(settings.vad.device)
-        except Exception as e:
-            console.print(f"[yellow]VAD for trimming not available: {e}[/yellow]")
-            self.vad_model = None
-            self.get_speech_timestamps = None
-            self.vad_device = "cpu"
-
-    def _trim_silence(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
-        """Trim silence from audio using VAD."""
-        if self.vad_model is None or self.get_speech_timestamps is None:
-            return audio
-
-        import torch
-
-        # Move tensor to GPU if available for faster processing
-        audio_tensor = torch.from_numpy(audio).to(self.vad_device)
-        speech_timestamps = self.get_speech_timestamps(
-            audio_tensor, self.vad_model, sampling_rate=sample_rate
-        )
-
-        if not speech_timestamps:
-            return audio  # Return original if no speech detected
-
-        # Extract from first speech start to last speech end
-        start = speech_timestamps[0]["start"]
-        end = speech_timestamps[-1]["end"]
-
-        # Add small padding (50ms) to avoid cutting off speech edges
-        padding = int(sample_rate * 0.05)
-        start = max(0, start - padding)
-        end = min(len(audio), end + padding)
-
-        trimmed = audio[start:end]
-        console.print(
-            f"[dim]Trimmed audio: {len(audio)/sample_rate:.2f}s -> {len(trimmed)/sample_rate:.2f}s[/dim]"
-        )
-        return trimmed
-
     def _is_hallucination(self, text: str) -> bool:
         """Detect common hallucination patterns like repetition loops."""
         words = text.lower().split()
@@ -122,16 +77,14 @@ class SpeechToText:
         self,
         audio: np.ndarray,
         sample_rate: int = 16000,
-        skip_vad_trim: bool = False,
     ) -> str:
         """
         Transcribe audio to text.
 
         Args:
-            audio: Audio samples as numpy array (float32, mono)
+            audio: Audio samples as numpy array (float32, mono), already
+                trimmed to speech boundaries by the pipeline VAD
             sample_rate: Sample rate in Hz (default 16000)
-            skip_vad_trim: If True, skip VAD-based silence trimming (useful when
-                          audio already comes from pipeline with VAD boundaries)
 
         Returns:
             Transcribed text
@@ -148,10 +101,6 @@ class SpeechToText:
         # Normalize if needed
         if np.abs(audio).max() > 1.0:
             audio = audio / np.abs(audio).max()
-
-        # Trim silence using VAD to prevent hallucinations (skip if already trimmed)
-        if not skip_vad_trim:
-            audio = self._trim_silence(audio, sample_rate)
 
         if len(audio) < sample_rate * 0.1:  # Less than 100ms of audio
             console.print("[dim]Audio too short, skipping[/dim]")
@@ -196,26 +145,6 @@ class SpeechToText:
         )
         console.print(f"[dim]Whisper warm-up done in {time.time() - start:.2f}s[/dim]")
 
-    def transcribe_file(self, audio_path: str | Path) -> str:
-        """
-        Transcribe audio from a file.
-
-        Args:
-            audio_path: Path to audio file (wav, mp3, etc.)
-
-        Returns:
-            Transcribed text
-        """
-        result = self.model.transcribe(
-            str(audio_path),
-            path_or_hf_repo=self.model_name,
-            language=self.language,
-            fp16=True,
-        )
-
-        return result.get("text", "").strip()
-
-
 # Quick test
 if __name__ == "__main__":
     import scipy.io.wavfile as wav
@@ -225,8 +154,11 @@ if __name__ == "__main__":
     # Test with a sample file if exists
     test_file = Path("test_audio.wav")
     if test_file.exists():
-        text = stt.transcribe_file(test_file)
+        rate, data = wav.read(test_file)
+        audio = data.astype(np.float32)
+        if data.dtype == np.int16:
+            audio /= 32768.0
+        text = stt.transcribe(audio, sample_rate=rate)
         console.print(f"[green]Transcription: {text}[/green]")
     else:
         console.print("[yellow]No test_audio.wav found. Create one to test.[/yellow]")
-        console.print("[dim]You can record with: arecord -d 5 -f S16_LE test_audio.wav[/dim]")

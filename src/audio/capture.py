@@ -148,14 +148,6 @@ class AudioCapture:
             return np.concatenate(self.recorded_chunks)
         return np.array([], dtype=np.float32)
 
-    def clear_queue(self) -> None:
-        """Clear any pending audio chunks."""
-        while not self.audio_queue.empty():
-            try:
-                self.audio_queue.get_nowait()
-            except queue.Empty:
-                break
-
     @staticmethod
     def list_devices() -> None:
         """Print available audio devices."""

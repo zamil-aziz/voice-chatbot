@@ -9,7 +9,6 @@ import time
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, Dict
@@ -21,6 +20,7 @@ from rich.text import Text
 
 from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector
 from ..models import SpeechToText, LanguageModel, TextToSpeech, NotesRAG
+from ..models.stt import StreamingTranscriber
 from ..processing import TextPreprocessor, DynamicSpeedController
 from config.settings import settings
 
@@ -111,6 +111,7 @@ class VoicePipeline:
         self.capture: Optional[AudioCapture] = None
         self.player: Optional[AudioPlayer] = None
         self.vad: Optional[VoiceActivityDetector] = None
+        self.stream_stt: Optional[StreamingTranscriber] = None
 
         # Processing components for natural speech
         self.text_preprocessor = TextPreprocessor(settings.tts.text_processing)
@@ -159,7 +160,7 @@ class VoicePipeline:
 
         def load_stt():
             if self.stt is None:
-                self.stt = SpeechToText()
+                self.stt = SpeechToText(model_name=settings.stt.model_name)
             return "STT"
 
         def load_llm():
@@ -239,6 +240,12 @@ class VoicePipeline:
             min_speech_duration_ms=settings.vad.min_speech_duration_ms,
             min_silence_duration_ms=settings.vad.min_silence_duration_ms,
             smoothing_window=settings.vad.smoothing_window,
+        )
+        self.stream_stt = StreamingTranscriber(
+            self.stt,
+            batch_seconds=settings.stt.stream_batch_seconds,
+            context_size=settings.stt.stream_context,
+            depth=settings.stt.stream_depth,
         )
 
     def _log_turn(self, user_text: str, assistant_response: str, timing: Dict[str, float]) -> None:
@@ -464,22 +471,26 @@ class VoicePipeline:
         finally:
             self.is_processing = False
 
-    def process_utterance(self, audio: np.ndarray) -> None:
+    def process_utterance(self, transcript_future) -> None:
         """
         Process a complete user utterance with streaming LLM→TTS.
 
         Args:
-            audio: User's speech audio
+            transcript_future: Future resolving to the streamed transcript
+                (transcription ran while the user was speaking)
         """
         self.is_processing = True
 
         try:
-            # Step 1: Transcribe speech
-            # Skip VAD trimming since pipeline VAD already detected speech boundaries
-            console.print("\n[cyan]Transcribing...[/cyan]")
+            # Step 1: Collect the streamed transcript (usually already done)
             start = time.time()
-            text = self.stt.transcribe(audio)
+            text = transcript_future.result(timeout=10.0)
             stt_time = time.time() - start
+
+            if text and self.stt._is_hallucination(text):
+                console.print("[dim]STT: [rejected hallucination][/dim]")
+                text = ""
+            console.print(f"[dim]STT finalize ({stt_time:.2f}s)[/dim]")
 
             if not text.strip():
                 console.print("[dim]No speech detected[/dim]")
@@ -560,9 +571,10 @@ class VoicePipeline:
 
             while not self._stop_event.is_set():
                 # Get audio chunk
-                chunk = self.capture.get_chunk(timeout=0.1)
-                if chunk is None:
+                item = self.capture.get_chunk(timeout=0.1)
+                if item is None:
                     continue
+                seq, chunk = item
 
                 # Wall-clock timestamps so VAD durations stay correct even
                 # when chunks are dropped under load.
@@ -581,6 +593,7 @@ class VoicePipeline:
                     self.vad.reset()
                     if self.capture.recording:
                         self.capture.stop_recording()
+                        self.stream_stt.abort()
 
                 # Process VAD
                 is_speech, speech_started, speech_ended = self.vad.process(
@@ -589,21 +602,32 @@ class VoicePipeline:
 
                 if speech_started:
                     self.capture.start_recording()
+                    # Start streaming transcription from the pre-buffer, which
+                    # already holds this chunk plus the utterance onset
+                    self.stream_stt.start(list(self.capture.pre_buffer))
+                elif self.vad.is_speaking:
+                    self.stream_stt.add(seq, chunk)
 
                 if speech_ended:
                     # Always stop recording so audio can't accumulate
-                    # unbounded across skipped turns.
-                    audio = self.capture.stop_recording()
+                    # unbounded across skipped turns. The trailing silence
+                    # chunk also flows into the stream via the pre-buffer
+                    # dedup, which is harmless.
+                    self.capture.stop_recording()
+                    self.stream_stt.add(seq, chunk)
                     if self.is_processing:
+                        self.stream_stt.abort()
                         console.print("[dim]Still responding, ignored input[/dim]")
-                    elif len(audio) > 0:
+                    else:
+                        transcript_future = self.stream_stt.finalize()
+
                         # Clean up finished threads
                         self._active_threads = [t for t in self._active_threads if t.is_alive()]
 
                         # Process in background to keep capturing
                         thread = threading.Thread(
                             target=self.process_utterance,
-                            args=(audio,),
+                            args=(transcript_future,),
                             daemon=True,
                         )
                         self._active_threads.append(thread)
@@ -671,6 +695,8 @@ class VoicePipeline:
             self.capture.stop()
         if self.player:
             self.player.stop()
+        if self.stream_stt:
+            self.stream_stt.close()
 
         console.print("[green]Voice assistant stopped.[/green]")
 

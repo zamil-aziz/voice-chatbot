@@ -56,6 +56,10 @@ class AudioCapture:
         self.recording = False
         self.recorded_chunks: list = []
 
+        # Monotonic chunk sequence number, shared by audio_queue and
+        # pre_buffer entries so consumers can deduplicate across the two
+        self._chunk_seq = 0
+
     def start(self) -> None:
         """Start audio capture."""
         if self.is_running:
@@ -74,15 +78,17 @@ class AudioCapture:
 
             # Get mono audio as float32 (single copy, reuse for all destinations)
             audio = indata[:, 0].astype(np.float32)
+            seq = self._chunk_seq
+            self._chunk_seq = seq + 1
 
             # Queue for processing (non-blocking to avoid audio glitches)
             try:
-                self.audio_queue.put_nowait(audio)
+                self.audio_queue.put_nowait((seq, audio))
             except queue.Full:
                 pass  # Drop chunk if queue full (consumer too slow)
 
             # Always keep recent audio in pre-buffer (for capturing speech start)
-            self.pre_buffer.append(audio)
+            self.pre_buffer.append((seq, audio))
 
             # Store if recording (need copy here since we're accumulating)
             if self.recording:
@@ -114,7 +120,7 @@ class AudioCapture:
 
         console.print("[yellow]Audio capture stopped[/yellow]")
 
-    def get_chunk(self, timeout: float = 1.0) -> Optional[np.ndarray]:
+    def get_chunk(self, timeout: float = 1.0) -> Optional[tuple[int, np.ndarray]]:
         """
         Get the next audio chunk from the queue.
 
@@ -122,7 +128,7 @@ class AudioCapture:
             timeout: Maximum time to wait in seconds
 
         Returns:
-            Audio chunk as numpy array, or None if timeout
+            Tuple of (sequence number, audio chunk), or None if timeout
         """
         try:
             return self.audio_queue.get(timeout=timeout)
@@ -133,7 +139,7 @@ class AudioCapture:
         """Start accumulating audio, including pre-buffer for speech already spoken."""
         # Include pre-buffered audio from before speech detection was confirmed
         # This captures the beginning of the utterance that would otherwise be lost
-        self.recorded_chunks = list(self.pre_buffer)
+        self.recorded_chunks = [chunk for _, chunk in self.pre_buffer]
         self.recording = True
 
     def stop_recording(self) -> np.ndarray:

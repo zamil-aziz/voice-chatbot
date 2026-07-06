@@ -21,6 +21,10 @@ class VADSettings(BaseModel):
     threshold: float = 0.5  # Speech probability threshold
     min_speech_duration_ms: int = 250  # Minimum speech duration
     min_silence_duration_ms: int = 300  # Silence before end-of-turn (reduced from 500ms for faster response)
+    # Chunks averaged for onset detection; small keeps the smoothed signal
+    # responsive (each chunk is 32ms). End-of-speech uses the raw probability
+    # so a bigger window would not delay turn end, only speech start.
+    smoothing_window: int = 4
     window_size_samples: int = 512  # Silero VAD window size
     device: Literal["auto", "cpu", "mps"] = "cpu"  # CPU is faster for tiny 512-sample chunks
     use_onnx: bool = True  # onnxruntime beats the JIT torch model on 512-sample chunks

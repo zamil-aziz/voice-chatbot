@@ -292,6 +292,7 @@ class VoicePipeline:
             threshold=settings.vad.threshold,
             min_speech_duration_ms=settings.vad.min_speech_duration_ms,
             min_silence_duration_ms=settings.vad.min_silence_duration_ms,
+            smoothing_window=settings.vad.smoothing_window,
         )
 
     def _log_turn(self, user_text: str, assistant_response: str, timing: Dict[str, float]) -> None:

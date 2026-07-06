@@ -30,6 +30,7 @@ class VoiceActivityDetector:
         min_silence_duration_ms: int = 500,
         sample_rate: int = 16000,
         window_size_samples: int = 512,
+        smoothing_window: int = 4,
     ):
         """
         Initialize VAD.
@@ -40,6 +41,7 @@ class VoiceActivityDetector:
             min_silence_duration_ms: Silence duration to end speech
             sample_rate: Audio sample rate (8000 or 16000)
             window_size_samples: Samples per VAD window (512 for 16kHz)
+            smoothing_window: Chunks averaged for onset detection
         """
         self.threshold = threshold
         self.min_speech_duration_ms = min_speech_duration_ms
@@ -52,8 +54,9 @@ class VoiceActivityDetector:
         self.speech_start_time = None
         self.silence_start_time = None
 
-        # Probability history for smoothing
-        self.prob_history = deque(maxlen=10)
+        # Probability history for smoothing speech onset
+        self.prob_history = deque(maxlen=smoothing_window)
+        self.last_raw_prob = 0.0
 
         # Use shared VAD model singleton (includes device for GPU acceleration)
         self.model, self.get_speech_timestamps, self.device = get_vad_model(settings.vad.device)
@@ -83,6 +86,7 @@ class VoiceActivityDetector:
 
         # Get probability
         speech_prob = self.model(audio_tensor, self.sample_rate).item()
+        self.last_raw_prob = speech_prob
 
         # Smooth probability
         self.prob_history.append(speech_prob)
@@ -103,8 +107,15 @@ class VoiceActivityDetector:
         Returns:
             Tuple of (is_speech, speech_started, speech_ended)
         """
-        prob = self.get_speech_probability(audio_chunk)
-        is_speech = prob >= self.threshold
+        smoothed_prob = self.get_speech_probability(audio_chunk)
+        # Asymmetric detection: onset uses the smoothed probability to reject
+        # one-chunk noise spikes; while speaking, the raw probability decides
+        # so silence registers immediately instead of waiting for the window
+        # mean to decay (the min_silence timer already debounces short pauses)
+        if self.is_speaking:
+            is_speech = self.last_raw_prob >= self.threshold
+        else:
+            is_speech = smoothed_prob >= self.threshold
 
         speech_started = False
         speech_ended = False
@@ -145,12 +156,18 @@ class VoiceActivityDetector:
 
         return is_speech, speech_started, speech_ended
 
+    def set_profile(self, threshold: float, min_speech_duration_ms: int) -> None:
+        """Switch detection strictness, e.g. a stricter profile during playback."""
+        self.threshold = threshold
+        self.min_speech_duration_ms = min_speech_duration_ms
+
     def reset(self) -> None:
         """Reset VAD state."""
         self.is_speaking = False
         self.speech_start_time = None
         self.silence_start_time = None
         self.prob_history.clear()
+        self.last_raw_prob = 0.0
 
 
 # Quick test

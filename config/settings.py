@@ -31,10 +31,14 @@ class VADSettings(BaseModel):
 
 
 class STTSettings(BaseModel):
-    """Speech-to-Text (Whisper) settings."""
-    model_name: str = "mlx-community/whisper-large-v3-turbo"
-    language: str = "en"
-    task: Literal["transcribe", "translate"] = "transcribe"
+    """Speech-to-Text (Parakeet TDT) settings."""
+    model_name: str = "mlx-community/parakeet-tdt-0.6b-v3"
+    # Streaming transcription: audio is fed to the encoder in batches of this
+    # size while the user is still speaking, so the transcript is (nearly)
+    # ready the moment the turn ends
+    stream_batch_seconds: float = 0.5
+    stream_context: tuple[int, int] = (256, 256)  # Local attention window (left, right)
+    stream_depth: int = 1
 
 
 class LLMSettings(BaseModel):

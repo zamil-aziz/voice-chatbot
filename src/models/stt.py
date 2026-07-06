@@ -1,12 +1,15 @@
 """
-Speech-to-Text module using Whisper via MLX.
-Optimized for Apple Silicon.
+Speech-to-Text module using NVIDIA Parakeet TDT via MLX.
+Supports batch transcription and streaming transcription during capture.
 """
 
+import queue
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import traceback
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from rich.console import Console
@@ -16,27 +19,48 @@ from config.settings import settings
 console = Console()
 
 
+def _to_mx_audio(audio: np.ndarray):
+    """Convert numpy float32 audio to a normalized 1D mx.array."""
+    import mlx.core as mx
+
+    if audio.dtype != np.float32:
+        audio = audio.astype(np.float32)
+    peak = np.abs(audio).max() if len(audio) else 0.0
+    if peak > 1.0:
+        audio = audio / peak
+    return mx.array(audio.reshape(-1))
+
+
 class SpeechToText:
-    """Whisper-based speech recognition using MLX."""
+    """Parakeet TDT speech recognition using MLX."""
 
     def __init__(
         self,
-        model_name: str = "mlx-community/whisper-large-v3-turbo",
-        language: str = "en",
+        model_name: str = "mlx-community/parakeet-tdt-0.6b-v3",
     ):
         self.model_name = model_name
-        self.language = language
         self.model = None
+        # The streaming context swaps the encoder attention implementation on
+        # enter/exit, so batch transcription must never overlap a stream
+        self._model_lock = threading.Lock()
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model with timeout. Downloads if not cached."""
-        console.print(f"[yellow]Loading Whisper model: {self.model_name}[/yellow]")
+        """Load Parakeet model with timeout. Downloads if not cached."""
+        console.print(f"[yellow]Loading STT model: {self.model_name}[/yellow]")
         start = time.time()
 
         def do_load():
-            import mlx_whisper
-            return mlx_whisper
+            import mlx.core as mx
+            from mlx.utils import tree_flatten
+            from parakeet_mlx import from_pretrained
+
+            model = from_pretrained(self.model_name)
+            # Force weight evaluation here: lazy arrays stay bound to this
+            # thread's MLX stream, and evaluating them later from another
+            # thread fails with "There is no Stream(gpu, N) in current thread"
+            mx.eval([value for _, value in tree_flatten(model.parameters())])
+            return model
 
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
@@ -44,15 +68,15 @@ class SpeechToText:
                 self.model = future.result(timeout=settings.model_load_timeout)
 
             console.print(
-                f"[green]Whisper model ready in {time.time() - start:.2f}s[/green]"
+                f"[green]STT model ready in {time.time() - start:.2f}s[/green]"
             )
         except FuturesTimeoutError:
             raise RuntimeError(
-                f"Whisper model loading timed out after {settings.model_load_timeout}s"
+                f"STT model loading timed out after {settings.model_load_timeout}s"
             )
         except ImportError as e:
-            console.print(f"[red]Failed to import mlx_whisper: {e}[/red]")
-            console.print("[yellow]Run: pip install mlx-whisper[/yellow]")
+            console.print(f"[red]Failed to import parakeet_mlx: {e}[/red]")
+            console.print("[yellow]Run: pip install parakeet-mlx[/yellow]")
             raise
 
     def _is_hallucination(self, text: str) -> bool:
@@ -84,7 +108,7 @@ class SpeechToText:
         Args:
             audio: Audio samples as numpy array (float32, mono), already
                 trimmed to speech boundaries by the pipeline VAD
-            sample_rate: Sample rate in Hz (default 16000)
+            sample_rate: Sample rate in Hz (must be 16000, Parakeet's rate)
 
         Returns:
             Transcribed text
@@ -94,30 +118,17 @@ class SpeechToText:
 
         start = time.time()
 
-        # Ensure audio is in correct format
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-
-        # Normalize if needed
-        if np.abs(audio).max() > 1.0:
-            audio = audio / np.abs(audio).max()
-
         if len(audio) < sample_rate * 0.1:  # Less than 100ms of audio
             console.print("[dim]Audio too short, skipping[/dim]")
             return ""
 
-        # Transcribe using mlx_whisper
-        result = self.model.transcribe(
-            audio,
-            path_or_hf_repo=self.model_name,
-            language=self.language,
-            fp16=True,  # Use FP16 for faster inference on M-series
-            condition_on_previous_text=False,  # Prevents hallucination on short phrases
-            compression_ratio_threshold=2.4,  # Detect repetition loops
-            no_speech_threshold=0.6,  # Better silence detection
-        )
+        from parakeet_mlx.audio import get_logmel
 
-        text = result.get("text", "").strip()
+        with self._model_lock:
+            mel = get_logmel(_to_mx_audio(audio), self.model.preprocessor_config)
+            result = self.model.generate(mel)[0]
+
+        text = result.text.strip()
         elapsed = time.time() - start
 
         # Check for hallucination patterns
@@ -134,16 +145,174 @@ class SpeechToText:
         if self.model is None:
             return
 
-        console.print("[dim]Warming up Whisper...[/dim]")
+        console.print("[dim]Warming up STT...[/dim]")
         start = time.time()
         dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
-        _ = self.model.transcribe(
-            dummy_audio,
-            path_or_hf_repo=self.model_name,
-            language=self.language,
-            fp16=True,
-        )
-        console.print(f"[dim]Whisper warm-up done in {time.time() - start:.2f}s[/dim]")
+
+        from parakeet_mlx.audio import get_logmel
+
+        with self._model_lock:
+            mel = get_logmel(_to_mx_audio(dummy_audio), self.model.preprocessor_config)
+            self.model.generate(mel)
+        console.print(f"[dim]STT warm-up done in {time.time() - start:.2f}s[/dim]")
+
+
+class StreamingTranscriber:
+    """Feeds VAD-gated audio into a Parakeet stream while the user speaks.
+
+    Runs a dedicated worker thread: encoding a batch of audio takes tens of
+    milliseconds, which would stall the main loop's 32ms chunk cadence.
+    By the time the utterance ends, the transcript is (nearly) ready, so
+    speech-to-text drops off the response critical path.
+    """
+
+    _SENTINEL = object()
+
+    def __init__(
+        self,
+        stt: SpeechToText,
+        batch_seconds: float = 0.5,
+        context_size: Tuple[int, int] = (256, 256),
+        depth: int = 1,
+        sample_rate: int = 16000,
+        on_partial: Optional[Callable[[str], None]] = None,
+    ):
+        self.stt = stt
+        self.batch_samples = int(batch_seconds * sample_rate)
+        self.context_size = tuple(context_size)
+        self.depth = depth
+        self.on_partial = on_partial
+
+        self._commands: queue.Queue = queue.Queue()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+
+    # Main-loop API (all non-blocking)
+
+    def start(self, prebuffer: List[Tuple[int, np.ndarray]]) -> None:
+        """Begin a streaming session, seeded with the capture pre-buffer."""
+        self._commands.put(("start", list(prebuffer)))
+
+    def add(self, seq: int, chunk: np.ndarray) -> None:
+        """Feed one live capture chunk (deduplicated against the pre-buffer by seq)."""
+        self._commands.put(("add", seq, chunk))
+
+    def finalize(self) -> "Future[str]":
+        """End the session; the returned future resolves to the final transcript."""
+        future: Future = Future()
+        self._commands.put(("finalize", future))
+        return future
+
+    def abort(self) -> None:
+        """Discard the current session (e.g. input ignored or barge-in reset)."""
+        self._commands.put(("abort",))
+
+    def close(self) -> None:
+        """Stop the worker thread."""
+        self._commands.put(self._SENTINEL)
+        self._worker.join(timeout=5.0)
+
+    # Worker internals
+
+    def _worker_loop(self) -> None:
+        stream_ctx = None
+        stream = None
+        last_seq = -1
+        pending: List[np.ndarray] = []
+        pending_samples = 0
+        last_partial = ""
+        session_error: Optional[BaseException] = None
+
+        def feed_pending(force: bool = False) -> None:
+            nonlocal pending, pending_samples, last_partial
+            if stream is None or not pending:
+                return
+            if not force and pending_samples < self.batch_samples:
+                return
+            batch = np.concatenate(pending)
+            pending = []
+            pending_samples = 0
+            stream.add_audio(_to_mx_audio(batch))
+            if self.on_partial is not None:
+                text = stream.result.text.strip()
+                if text and text != last_partial:
+                    last_partial = text
+                    self.on_partial(text)
+
+        def close_stream() -> None:
+            nonlocal stream_ctx, stream, pending, pending_samples, last_seq, last_partial, session_error
+            if stream_ctx is not None:
+                try:
+                    stream_ctx.__exit__(None, None, None)
+                finally:
+                    self.stt._model_lock.release()
+            stream_ctx = None
+            stream = None
+            pending = []
+            pending_samples = 0
+            last_seq = -1
+            last_partial = ""
+            session_error = None
+
+        while True:
+            command = self._commands.get()
+            if command is self._SENTINEL:
+                close_stream()
+                return
+
+            try:
+                kind = command[0]
+                if kind == "start":
+                    close_stream()
+                    self.stt._model_lock.acquire()
+                    try:
+                        stream_ctx = self.stt.model.transcribe_stream(
+                            context_size=self.context_size, depth=self.depth
+                        )
+                        stream = stream_ctx.__enter__()
+                    except BaseException:
+                        self.stt._model_lock.release()
+                        stream_ctx = None
+                        stream = None
+                        raise
+                    for seq, chunk in command[1]:
+                        if seq > last_seq:
+                            last_seq = seq
+                            pending.append(chunk)
+                            pending_samples += len(chunk)
+                    feed_pending()
+                elif kind == "add":
+                    _, seq, chunk = command
+                    if stream is not None and seq > last_seq:
+                        last_seq = seq
+                        pending.append(chunk)
+                        pending_samples += len(chunk)
+                        feed_pending()
+                elif kind == "finalize":
+                    future = command[1]
+                    if session_error is not None:
+                        future.set_exception(session_error)
+                    elif stream is None:
+                        future.set_result("")
+                    else:
+                        try:
+                            feed_pending(force=True)
+                            text = stream.result.text.strip()
+                            future.set_result(text)
+                        except BaseException as exc:
+                            future.set_exception(exc)
+                    close_stream()
+                elif kind == "abort":
+                    close_stream()
+            except BaseException as exc:
+                # Remember the failure so finalize() surfaces it; a broken
+                # session must not take down the worker thread
+                session_error = exc
+                console.print(
+                    f"[red]Streaming STT error: {exc}[/red]\n"
+                    f"[dim]{traceback.format_exc()}[/dim]"
+                )
+
 
 # Quick test
 if __name__ == "__main__":

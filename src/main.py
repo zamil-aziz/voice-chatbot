@@ -32,7 +32,7 @@ console = Console()
 
 def test_stt():
     """Test speech-to-text component."""
-    console.print(Panel("[bold]Testing Speech-to-Text (Whisper)[/bold]"))
+    console.print(Panel("[bold]Testing Speech-to-Text (Parakeet TDT)[/bold]"))
 
     from .models import SpeechToText
     from .audio import AudioCapture
@@ -114,9 +114,10 @@ def test_vad():
         timestamp_ms = 0
 
         while time.time() - start < 10:
-            chunk = capture.get_chunk(timeout=0.1)
-            if chunk is None:
+            item = capture.get_chunk(timeout=0.1)
+            if item is None:
                 continue
+            _, chunk = item
 
             timestamp_ms += 32  # ~32ms per chunk at 16kHz/512
 

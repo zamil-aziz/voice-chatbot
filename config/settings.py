@@ -39,7 +39,7 @@ class STTSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     """Language Model settings."""
-    model_name: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    model_name: str = "mlx-community/Qwen3.5-4B-MLX-4bit"
     # Safety net, not a target: the persona keeps replies short, and a cap
     # this size means detailed answers no longer truncate mid-thought.
     max_tokens: int = 256

@@ -1,7 +1,6 @@
 # MLX - Apple Silicon optimized ML framework
-# MLX 0.31.x currently SIGBUS-crashes on this Mac when imported with Kokoro/PyTorch.
-mlx==0.30.1
-mlx-lm==0.30.0
+mlx>=0.31,<0.33
+mlx-lm>=0.31.3,<0.32  # Qwen3.5 support and trimmable prompt cache API
 
 # Whisper for Speech-to-Text
 mlx-whisper>=0.4.0

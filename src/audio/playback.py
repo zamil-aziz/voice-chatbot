@@ -43,6 +43,10 @@ class AudioPlayer:
         self._playing_lock = threading.Lock()
         self._stop_flag = threading.Event()
         self._playback_thread: Optional[threading.Thread] = None
+        # Serializes teardown of _playback_thread so a barge-in stop() racing
+        # the turn's own stop()/stop_streaming() can never read the handle
+        # after the other thread cleared it
+        self._thread_lock = threading.Lock()
         self._audio_queue: queue.Queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
         # Ring buffer for gapless streaming playback: deque of numpy chunks
         # plus a read offset into the head chunk
@@ -50,7 +54,6 @@ class AudioPlayer:
         self._read_offset = 0
         self._buffered_samples = 0
         self._buffer_lock = threading.Lock()
-        self._stream_started = threading.Event()
 
     @property
     def is_playing(self) -> bool:
@@ -98,11 +101,14 @@ class AudioPlayer:
             self._read_offset = 0
             self._buffered_samples = 0
 
-        # Join the worker so a later start_streaming() never overlaps
-        # two OutputStreams on the same device
-        if self._playback_thread:
-            self._playback_thread.join(timeout=2.0)
+        # Claim the worker handle atomically, then join outside the lock so a
+        # later start_streaming() never overlaps two OutputStreams. _stop_flag
+        # is already set, so the worker exits promptly.
+        with self._thread_lock:
+            thread = self._playback_thread
             self._playback_thread = None
+        if thread is not None:
+            thread.join(timeout=2.0)
 
         self.is_playing = False
 
@@ -118,7 +124,6 @@ class AudioPlayer:
         self._stream_buffer = collections.deque()
         self._read_offset = 0
         self._buffered_samples = 0
-        self._stream_started.clear()
 
         def stream_worker():
             import sounddevice as sd
@@ -151,8 +156,6 @@ class AudioPlayer:
                 device=self.device,
                 blocksize=1024,  # ~42ms at 24kHz
             ):
-                self._stream_started.set()
-
                 while not self._stop_flag.is_set():
                     try:
                         audio, sr = self._audio_queue.get(timeout=0.1)
@@ -215,14 +218,17 @@ class AudioPlayer:
         except queue.Full:
             pass
 
-        # Wait for thread to finish playing all queued audio
-        if self._playback_thread:
-            self._playback_thread.join(timeout=10.0)
-            if self._playback_thread.is_alive():
+        # Claim the worker handle atomically so a concurrent stop() (a barge-in
+        # during the drain) can't join or clear it at the same time.
+        with self._thread_lock:
+            thread = self._playback_thread
+            self._playback_thread = None
+        if thread is not None:
+            thread.join(timeout=10.0)
+            if thread.is_alive():
                 console.print(
                     "[yellow]Playback worker did not stop within 10s[/yellow]"
                 )
-            self._playback_thread = None
 
         # Only now set flags - audio has finished naturally
         self._stop_flag.set()

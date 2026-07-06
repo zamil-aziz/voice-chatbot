@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from typing import Generator, Optional, List, Dict
 
 from rich.console import Console
+from rich.markup import escape
 
 from config.settings import settings
 from mlx_lm.sample_utils import make_sampler
@@ -286,7 +287,7 @@ Use them only if they genuinely help with this message; otherwise ignore them si
         assistant_response = self.clean_response_text("".join(chunks))
 
         elapsed = time.time() - start
-        console.print(f"[dim]LLM ({elapsed:.2f}s): {assistant_response[:50]}...[/dim]")
+        console.print(f"[dim]LLM ({elapsed:.2f}s): {escape(assistant_response[:50])}...[/dim]")
 
         self.commit_turn(user_message, assistant_response)
 

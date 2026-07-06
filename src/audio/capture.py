@@ -51,6 +51,9 @@ class AudioCapture:
         # This ensures we don't lose the beginning of utterances while VAD confirms speech
         pre_buffer_chunks = int((sample_rate * 0.5) / chunk_size) + 1  # ~500ms of chunks
         self.pre_buffer: deque = deque(maxlen=pre_buffer_chunks)
+        # Guards pre_buffer: the audio callback appends from the realtime
+        # thread while the main loop snapshots it at speech onset
+        self._pre_buffer_lock = threading.Lock()
 
         # Accumulated audio for recording
         self.recording = False
@@ -88,7 +91,8 @@ class AudioCapture:
                 pass  # Drop chunk if queue full (consumer too slow)
 
             # Always keep recent audio in pre-buffer (for capturing speech start)
-            self.pre_buffer.append((seq, audio))
+            with self._pre_buffer_lock:
+                self.pre_buffer.append((seq, audio))
 
             # Store if recording (need copy here since we're accumulating)
             if self.recording:
@@ -135,11 +139,20 @@ class AudioCapture:
         except queue.Empty:
             return None
 
+    def snapshot_pre_buffer(self) -> list[tuple[int, np.ndarray]]:
+        """Return a stable copy of the pre-buffer, safe against the callback.
+
+        Iterating the deque directly would race the realtime append and raise
+        "deque mutated during iteration"; the copy happens under the lock.
+        """
+        with self._pre_buffer_lock:
+            return list(self.pre_buffer)
+
     def start_recording(self) -> None:
         """Start accumulating audio, including pre-buffer for speech already spoken."""
         # Include pre-buffered audio from before speech detection was confirmed
         # This captures the beginning of the utterance that would otherwise be lost
-        self.recorded_chunks = [chunk for _, chunk in self.pre_buffer]
+        self.recorded_chunks = [chunk for _, chunk in self.snapshot_pre_buffer()]
         self.recording = True
 
     def stop_recording(self) -> np.ndarray:

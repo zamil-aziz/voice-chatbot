@@ -13,6 +13,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from rich.console import Console
+from rich.markup import escape
 
 from config.settings import settings
 
@@ -133,10 +134,10 @@ class SpeechToText:
 
         # Check for hallucination patterns
         if self._is_hallucination(text):
-            console.print(f"[dim]STT ({elapsed:.2f}s): [rejected hallucination][/dim]")
+            console.print(f"[dim]STT ({elapsed:.2f}s): \\[rejected hallucination][/dim]")
             return ""
 
-        console.print(f"[dim]STT ({elapsed:.2f}s): {text}[/dim]")
+        console.print(f"[dim]STT ({elapsed:.2f}s): {escape(text)}[/dim]")
 
         return text
 
@@ -241,11 +242,10 @@ class StreamingTranscriber:
 
         def close_stream() -> None:
             nonlocal stream_ctx, stream, pending, pending_samples, last_seq, last_partial, session_error
-            if stream_ctx is not None:
-                try:
-                    stream_ctx.__exit__(None, None, None)
-                finally:
-                    self.stt._model_lock.release()
+            # Clear state before exiting the context so a __exit__ that raises
+            # can't leave stream_ctx set and make a later call double-release
+            # the model lock.
+            ctx = stream_ctx
             stream_ctx = None
             stream = None
             pending = []
@@ -253,6 +253,11 @@ class StreamingTranscriber:
             last_seq = -1
             last_partial = ""
             session_error = None
+            if ctx is not None:
+                try:
+                    ctx.__exit__(None, None, None)
+                finally:
+                    self.stt._model_lock.release()
 
         while True:
             command = self._commands.get()

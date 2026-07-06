@@ -25,6 +25,7 @@ import sys
 import time
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 console = Console()
@@ -51,7 +52,7 @@ def test_stt():
     console.print("[yellow]Transcribing...[/yellow]")
 
     text = stt.transcribe(audio)
-    console.print(f"\n[bold green]Transcription:[/bold green] {text}")
+    console.print(f"\n[bold green]Transcription:[/bold green] {escape(text)}")
 
 
 def test_llm():
@@ -71,7 +72,7 @@ def test_llm():
     for prompt in prompts:
         console.print(f"\n[bold white]User:[/bold white] {prompt}")
         response = llm.generate(prompt)
-        console.print(f"[bold green]Assistant:[/bold green] {response}")
+        console.print(f"[bold green]Assistant:[/bold green] {escape(response)}")
 
 
 def test_tts():

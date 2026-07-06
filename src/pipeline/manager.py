@@ -14,9 +14,7 @@ from pathlib import Path
 from typing import Optional, Callable, Dict
 
 from rich.console import Console
-from rich.live import Live
-from rich.panel import Panel
-from rich.text import Text
+from rich.markup import escape
 
 from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector
 from ..models import SpeechToText, LanguageModel, TextToSpeech, NotesRAG
@@ -458,7 +456,7 @@ class VoicePipeline:
             if not text.strip():
                 return
 
-            console.print(f"[bold white]You:[/bold white] {text}")
+            console.print(f"[bold white]You:[/bold white] {escape(text)}")
 
             # Retrieve relevant context from RAG
             rag_context = []
@@ -475,7 +473,7 @@ class VoicePipeline:
                 rag_context=rag_context,
                 rag_time=rag_time,
             )
-            console.print(f"[bold green]Assistant:[/bold green] {response}")
+            console.print(f"[bold green]Assistant:[/bold green] {escape(response)}")
 
             # Log timing
             console.print(
@@ -536,7 +534,7 @@ class VoicePipeline:
             stt_time = time.time() - start
 
             if text and self.stt._is_hallucination(text):
-                console.print("[dim]STT: [rejected hallucination][/dim]")
+                console.print("[dim]STT: \\[rejected hallucination][/dim]")
                 text = ""
             console.print(f"[dim]STT finalize ({stt_time:.2f}s)[/dim]")
 
@@ -549,7 +547,7 @@ class VoicePipeline:
                 # utterance supersedes this turn
                 return
 
-            console.print(f"[bold white]You:[/bold white] {text}")
+            console.print(f"[bold white]You:[/bold white] {escape(text)}")
 
             # Start RAG search in background while we prepare LLM
             rag_future = None
@@ -586,7 +584,7 @@ class VoicePipeline:
                 stt_time=stt_time,
                 rag_time=rag_time,
             )
-            console.print(f"[bold green]Assistant:[/bold green] {response}")
+            console.print(f"[bold green]Assistant:[/bold green] {escape(response)}")
 
             # Log timing
             console.print(
@@ -650,12 +648,10 @@ class VoicePipeline:
                         continue
                     if was_playing:
                         # Playback just finished; drop any speech state and
-                        # partial recording built up from TTS bleed.
+                        # partial stream built up from TTS bleed.
                         was_playing = False
                         self.vad.reset()
-                        if self.capture.recording:
-                            self.capture.stop_recording()
-                            self.stream_stt.abort()
+                        self.stream_stt.abort()
                 elif playing != was_playing:
                     # Barge-in mode: keep listening during playback, but with
                     # a stricter VAD profile since the microphone re-hears the
@@ -683,22 +679,20 @@ class VoicePipeline:
                 )
 
                 if speech_started:
-                    if self.is_processing or self.player.is_playing:
+                    if settings.barge_in.enabled and (
+                        self.is_processing or self.player.is_playing
+                    ):
                         self._interrupt_current_turn()
-                    self.capture.start_recording()
                     # Start streaming transcription from the pre-buffer, which
                     # already holds this chunk plus the utterance onset
                     self._rag_prefetch = None
-                    self.stream_stt.start(list(self.capture.pre_buffer))
+                    self.stream_stt.start(self.capture.snapshot_pre_buffer())
                 elif self.vad.is_speaking:
                     self.stream_stt.add(seq, chunk)
 
                 if speech_ended:
-                    # Always stop recording so audio can't accumulate
-                    # unbounded across skipped turns. The trailing silence
-                    # chunk also flows into the stream via the pre-buffer
-                    # dedup, which is harmless.
-                    self.capture.stop_recording()
+                    # The trailing silence chunk also flows into the stream via
+                    # the pre-buffer dedup, which is harmless.
                     self.stream_stt.add(seq, chunk)
                     if self.is_processing:
                         self.stream_stt.abort()

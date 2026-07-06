@@ -103,8 +103,7 @@ def main():
                 duration = len(audio) / sr
                 console.print(f"  [green]Saved:[/green] {filename.name} ({duration:.2f}s)")
     finally:
-        for tts in loaded_tts.values():
-            tts.close()
+        loaded_tts.clear()
 
     # Print listening guide
     console.print("\n" + "=" * 60)

@@ -190,8 +190,7 @@ class VoicePipeline:
                     voice=settings.tts.voice,
                     speed=settings.tts.speed,
                     voice_blend=voice_blend,
-                    device=settings.tts.device,
-                    isolated=settings.tts.isolated_process,
+                    model_name=settings.tts.model_name,
                     load_timeout=settings.model_load_timeout,
                 )
             return "TTS"
@@ -672,8 +671,6 @@ class VoicePipeline:
             self.capture.stop()
         if self.player:
             self.player.stop()
-        if self.tts and hasattr(self.tts, "close"):
-            self.tts.close()
 
         console.print("[green]Voice assistant stopped.[/green]")
 

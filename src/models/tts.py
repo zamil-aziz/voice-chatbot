@@ -1,20 +1,14 @@
 """
-Text-to-Speech module using Kokoro.
-Produces realistic, natural-sounding speech.
+Text-to-Speech module using Kokoro on MLX.
+Produces realistic, natural-sounding speech fully in-process.
 """
 
 import time
-import itertools
-import multiprocessing as mp
-import os
-import queue
-import traceback
-from typing import Optional, List, Tuple, Union
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from typing import Optional, List, Tuple
 import numpy as np
 
 from rich.console import Console
-
-from ..utils import resolve_torch_device
 
 console = Console()
 
@@ -32,12 +26,44 @@ def _log_stream_stats(start: float, first_chunk_time, chunk_count: int, total_au
     )
 
 
-def _audio_to_numpy(audio_chunk):
-    if hasattr(audio_chunk, "numpy"):
-        return audio_chunk.numpy()
-    if hasattr(audio_chunk, "__array__"):
-        return np.asarray(audio_chunk)
-    return audio_chunk
+def _audio_to_numpy(audio_chunk) -> np.ndarray:
+    audio = np.asarray(audio_chunk, dtype=np.float32)
+    return audio.reshape(-1)
+
+
+def _patch_mlx_audio_sinegen() -> None:
+    """Fix a length mismatch in mlx-audio's Kokoro vocoder (as of 0.4.4).
+
+    SineGen._f02sine down- then up-samples the phase by the hop size (300);
+    the rounding can yield one extra frame, so the sine excitation ends up
+    300 samples longer than the f0-derived unvoiced mask and the two fail to
+    broadcast (e.g. on inputs like "Your AI voice assistant"). The reference
+    PyTorch implementation keeps the sine length equal to the f0 length, so
+    reconcile to that.
+    """
+    from mlx_audio.tts.models.kokoro import istftnet
+    import mlx.core as mx
+
+    if getattr(istftnet.SineGen, "_f02sine_length_patched", False):
+        return
+
+    original = istftnet.SineGen._f02sine
+
+    def _f02sine_fixed(self, f0_values):
+        sines = original(self, f0_values)
+        target = f0_values.shape[1]
+        if sines.shape[1] > target:
+            sines = sines[:, :target, :]
+        elif sines.shape[1] < target:
+            pad = mx.zeros(
+                (sines.shape[0], target - sines.shape[1], sines.shape[2]),
+                dtype=sines.dtype,
+            )
+            sines = mx.concatenate([sines, pad], axis=1)
+        return sines
+
+    istftnet.SineGen._f02sine = _f02sine_fixed
+    istftnet.SineGen._f02sine_length_patched = True
 
 
 def _create_blended_voice_tensor(
@@ -89,74 +115,8 @@ def _create_blended_voice_tensor(
     return blended
 
 
-def _tts_worker_main(
-    request_queue,
-    response_queue,
-    voice: str,
-    speed: float,
-    voice_blend: Optional[List[Tuple[str, float]]],
-    device: str,
-) -> None:
-    """Run Kokoro in an isolated process to avoid native shutdown crashes."""
-    request_id = None
-    try:
-        from kokoro import KPipeline
-
-        lang_code = voice[0]
-        resolved_device = resolve_torch_device(device)
-        pipeline = KPipeline(lang_code=lang_code, device=resolved_device)
-
-        blended_voice = None
-        if voice_blend:
-            blended_voice = _create_blended_voice_tensor(
-                pipeline,
-                voice_blend,
-                TextToSpeech.VOICES,
-            )
-
-        response_queue.put(("ready", resolved_device))
-
-        while True:
-            request = request_queue.get()
-            command = request[0]
-            if command == "close":
-                break
-
-            if command != "synthesize":
-                continue
-
-            _, request_id, text, request_speed = request
-            use_speed = request_speed if request_speed is not None else speed
-            selected_voice = blended_voice if blended_voice is not None else voice
-
-            for graphemes, phonemes, audio_chunk in pipeline(
-                text,
-                voice=selected_voice,
-                speed=use_speed,
-            ):
-                response_queue.put((
-                    "chunk",
-                    request_id,
-                    graphemes,
-                    phonemes,
-                    _audio_to_numpy(audio_chunk),
-                ))
-            response_queue.put(("done", request_id))
-    except BaseException:
-        response_queue.put(("error", request_id, traceback.format_exc()))
-    finally:
-        # Kokoro imports sentencepiece, whose Abseil flag cleanup can SIGBUS on
-        # this macOS/Python combination. Exit directly so the parent stays clean.
-        try:
-            response_queue.close()
-            response_queue.join_thread()
-        except Exception:
-            pass
-        os._exit(0)
-
-
 class TextToSpeech:
-    """Kokoro-based text-to-speech synthesis."""
+    """Kokoro-based text-to-speech synthesis on MLX."""
 
     # Available Kokoro English voices (28 total, sorted by quality grade)
     VOICES = {
@@ -200,132 +160,59 @@ class TextToSpeech:
         speed: float = 1.0,
         sample_rate: int = 24000,
         voice_blend: Optional[List[Tuple[str, float]]] = None,
-        device: str = "cpu",
-        isolated: bool = True,
+        model_name: str = "mlx-community/Kokoro-82M-bf16",
         load_timeout: int = 300,
     ):
         self.voice = voice
         self.speed = speed
         self.sample_rate = sample_rate
         self.voice_blend = voice_blend  # e.g., [("af_bella", 0.6), ("af_heart", 0.4)]
-        self.device = device
-        self.isolated = isolated
+        self.model_name = model_name
         self.load_timeout = load_timeout
         self.pipeline = None
         self._blended_voice_tensor = None
-        self._request_queue = None
-        self._response_queue = None
-        self._worker_process = None
-        self._request_ids = itertools.count(1)
-        if self.isolated:
-            self._start_worker()
-        else:
-            self._load_model()
-
-    def _start_worker(self) -> None:
-        """Start the isolated Kokoro worker process."""
-        console.print(f"[yellow]Loading TTS worker (voice: {self.voice})[/yellow]")
-        start = time.time()
-        ctx = mp.get_context("spawn")
-        self._request_queue = ctx.Queue()
-        self._response_queue = ctx.Queue()
-        self._worker_process = ctx.Process(
-            target=_tts_worker_main,
-            args=(
-                self._request_queue,
-                self._response_queue,
-                self.voice,
-                self.speed,
-                self.voice_blend,
-                self.device,
-            ),
-            daemon=True,
-        )
-        self._worker_process.start()
-
-        deadline = time.time() + self.load_timeout
-        while True:
-            if time.time() > deadline:
-                self.close()
-                raise RuntimeError(f"TTS worker loading timed out after {self.load_timeout}s")
-            if not self._worker_process.is_alive():
-                exitcode = self._worker_process.exitcode
-                self.close()
-                raise RuntimeError(f"TTS worker exited before ready (exit code {exitcode})")
-            try:
-                message = self._response_queue.get(timeout=0.1)
-                break
-            except queue.Empty:
-                continue
-
-        if message[0] == "error":
-            self.close()
-            raise RuntimeError(f"TTS worker failed to load:\n{message[2]}")
-        if message[0] != "ready":
-            self.close()
-            raise RuntimeError(f"Unexpected TTS worker response: {message}")
-
-        resolved_device = message[1]
-        console.print(f"[green]TTS worker ready on {resolved_device.upper()} in {time.time() - start:.2f}s[/green]")
+        self._load_model()
 
     def _load_model(self) -> None:
-        """Load Kokoro TTS model with timeout."""
+        """Load the MLX Kokoro model and pipeline with timeout."""
         console.print(f"[yellow]Loading TTS model (voice: {self.voice})[/yellow]")
         start = time.time()
 
         def do_load():
-            device = resolve_torch_device(self.device)
+            from mlx_audio.tts.models.kokoro import KokoroPipeline
+            from mlx_audio.tts.utils import get_model_path, load_model
 
-            from kokoro import KPipeline
-
+            _patch_mlx_audio_sinegen()
+            model_path = get_model_path(self.model_name)
+            model = load_model(model_path)
             # 'a' = American English, 'b' = British English
-            lang_code = self.voice[0]  # 'a' or 'b'
-
-            try:
-                pipeline = KPipeline(lang_code=lang_code, device=device)
-                console.print(f"[green]TTS loaded on {device.upper()} (GPU accelerated)[/green]")
-                return pipeline
-            except RuntimeError as e:
-                # If MPS still fails, fall back to CPU
-                if device == "mps":
-                    console.print(f"[yellow]MPS failed ({str(e)[:50]}...), using CPU[/yellow]")
-                    return KPipeline(lang_code=lang_code, device="cpu")
-                raise
+            return KokoroPipeline(
+                lang_code=self.voice[0],
+                model=model,
+                repo_id=self.model_name,
+            )
 
         try:
-            # Kokoro/PyTorch model construction is safer on the main thread on macOS.
-            self.pipeline = do_load()
-
-            # Create blended voice if configured
-            if self.voice_blend:
-                self._create_blended_voice()
-
-            console.print(
-                f"[green]TTS ready in {time.time() - start:.2f}s[/green]"
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(do_load)
+                self.pipeline = future.result(timeout=self.load_timeout)
+        except FuturesTimeoutError:
+            raise RuntimeError(
+                f"TTS model loading timed out after {self.load_timeout}s"
             )
         except ImportError as e:
-            console.print(f"[red]Failed to import kokoro: {e}[/red]")
-            console.print("[yellow]Run: pip install kokoro[/yellow]")
+            console.print(f"[red]Failed to import mlx_audio: {e}[/red]")
+            console.print("[yellow]Run: pip install mlx-audio[/yellow]")
             raise
 
-    def _create_blended_voice(self) -> None:
-        """
-        Create a blended voice tensor from multiple voices.
+        if self.voice_blend:
+            self._blended_voice_tensor = _create_blended_voice_tensor(
+                self.pipeline,
+                self.voice_blend,
+                self.VOICES,
+            )
 
-        Voice blending allows mixing characteristics from different voices
-        to create unique, more expressive voice profiles.
-        """
-        self._blended_voice_tensor = _create_blended_voice_tensor(
-            self.pipeline,
-            self.voice_blend,
-            self.VOICES,
-        )
-
-    def _get_voice_for_synthesis(self) -> Union[str, "torch.Tensor"]:
-        """Get the voice to use for synthesis (blended tensor or voice name)."""
-        if self._blended_voice_tensor is not None:
-            return self._blended_voice_tensor
-        return self.voice
+        console.print(f"[green]TTS ready in {time.time() - start:.2f}s[/green]")
 
     def synthesize(self, text: str, speed: Optional[float] = None) -> tuple[np.ndarray, int]:
         """
@@ -338,18 +225,14 @@ class TextToSpeech:
         Returns:
             Tuple of (audio samples as float32 numpy array, sample rate)
         """
-        if not self.isolated and self.pipeline is None:
-            raise RuntimeError("Model not loaded")
-
         start = time.time()
         use_speed = speed if speed is not None else self.speed
 
-        # Collect all audio chunks (convert tensors to numpy)
-        audio_chunks = []
-        for _, _, audio_chunk in self.synthesize_stream(text, speed=use_speed):
-            audio_chunks.append(audio_chunk)
+        audio_chunks = [
+            audio_chunk
+            for _, _, audio_chunk in self.synthesize_stream(text, speed=use_speed)
+        ]
 
-        # Concatenate all chunks
         if audio_chunks:
             audio = np.concatenate(audio_chunks)
         else:
@@ -376,14 +259,15 @@ class TextToSpeech:
         Yields:
             Tuples of (graphemes, phonemes, audio_chunk)
         """
-        if not self.isolated and self.pipeline is None:
+        if self.pipeline is None:
             raise RuntimeError("Model not loaded")
 
         use_speed = speed if speed is not None else self.speed
-
-        if self.isolated:
-            yield from self._synthesize_stream_worker(text, use_speed)
-            return
+        voice = (
+            self._blended_voice_tensor
+            if self._blended_voice_tensor is not None
+            else self.voice
+        )
 
         start = time.time()
         first_chunk_time = None
@@ -392,14 +276,16 @@ class TextToSpeech:
 
         for graphemes, phonemes, audio_chunk in self.pipeline(
             text,
-            voice=self._get_voice_for_synthesis(),
+            voice=voice,
             speed=use_speed,
         ):
+            if audio_chunk is None:
+                continue
+
             chunk_count += 1
             if first_chunk_time is None:
                 first_chunk_time = time.time() - start
 
-            # Convert tensor to numpy if needed
             audio_chunk = _audio_to_numpy(audio_chunk)
 
             total_audio_samples += len(audio_chunk)
@@ -407,47 +293,9 @@ class TextToSpeech:
 
         _log_stream_stats(start, first_chunk_time, chunk_count, total_audio_samples, self.sample_rate)
 
-    def _synthesize_stream_worker(self, text: str, speed: Optional[float] = None):
-        """Request streamed audio from the isolated Kokoro worker."""
-        if not self._worker_process or not self._worker_process.is_alive():
-            raise RuntimeError("TTS worker is not running")
-
-        request_id = next(self._request_ids)
-        self._request_queue.put(("synthesize", request_id, text, speed))
-
-        start = time.time()
-        first_chunk_time = None
-        chunk_count = 0
-        total_audio_samples = 0
-
-        while True:
-            try:
-                message = self._response_queue.get(timeout=1.0)
-            except queue.Empty:
-                if not self._worker_process.is_alive():
-                    raise RuntimeError("TTS worker exited unexpectedly")
-                continue
-
-            message_type = message[0]
-            if message_type == "error":
-                raise RuntimeError(f"TTS worker error:\n{message[2]}")
-            if message_type == "done" and message[1] == request_id:
-                break
-            if message_type != "chunk" or message[1] != request_id:
-                continue
-
-            _, _, graphemes, phonemes, audio_chunk = message
-            chunk_count += 1
-            if first_chunk_time is None:
-                first_chunk_time = time.time() - start
-            total_audio_samples += len(audio_chunk)
-            yield graphemes, phonemes, audio_chunk
-
-        _log_stream_stats(start, first_chunk_time, chunk_count, total_audio_samples, self.sample_rate)
-
     def warmup(self) -> None:
         """Warm up TTS to avoid cold-start latency on first real synthesis."""
-        if not self.isolated and self.pipeline is None:
+        if self.pipeline is None:
             return
 
         console.print("[dim]Warming up TTS...[/dim]")
@@ -457,27 +305,6 @@ class TextToSpeech:
             pass
         elapsed = time.time() - start
         console.print(f"[dim]TTS warm-up done in {elapsed:.2f}s[/dim]")
-
-    def close(self) -> None:
-        """Stop the isolated TTS worker if one is running."""
-        if self._worker_process is None:
-            return
-        if self._worker_process.is_alive():
-            try:
-                self._request_queue.put(("close",))
-                self._worker_process.join(timeout=2.0)
-            except Exception:
-                pass
-        if self._worker_process.is_alive():
-            self._worker_process.terminate()
-            self._worker_process.join(timeout=2.0)
-        self._worker_process = None
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
 
 
 # Quick test

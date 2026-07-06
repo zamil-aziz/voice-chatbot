@@ -103,10 +103,9 @@ class SpeedControlSettings(BaseModel):
 
 class TTSSettings(BaseModel):
     """Text-to-Speech settings."""
+    model_name: str = "mlx-community/Kokoro-82M-bf16"
     voice: str = "af_heart"  # Highest quality voice [A grade]
     speed: float = 1.0
-    device: Literal["auto", "cpu", "mps"] = "cpu"  # Avoid MLX/PyTorch GPU contention during streaming
-    isolated_process: bool = True  # Avoid native sentencepiece/Kokoro shutdown crashes in main process
     # Voice blending: mix multiple voices for unique characteristics
     voice_blend: Optional[List[VoiceBlendConfig]] = None
     # Processing stages for natural speech

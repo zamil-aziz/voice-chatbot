@@ -16,8 +16,9 @@ silero-vad>=5.1
 # RAG embeddings for personal notes
 sentence-transformers>=5.2.0
 
-# TTS - Kokoro (realistic voices)
-kokoro>=0.9.4
+# TTS - Kokoro on MLX (realistic voices, in-process, no PyTorch in the TTS path)
+mlx-audio>=0.4.4,<0.5
+misaki>=0.9.4  # Kokoro G2P (English)
 
 # Utilities
 rich>=13.9.0  # Pretty console output

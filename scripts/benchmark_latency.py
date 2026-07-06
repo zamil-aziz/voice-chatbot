@@ -135,48 +135,45 @@ def benchmark_llm(model_names: list[str], max_tokens: int) -> list[dict[str, Any
     return results
 
 
-def benchmark_tts(devices: list[str], voice: str) -> list[dict[str, Any]]:
+def benchmark_tts(voice: str) -> list[dict[str, Any]]:
     results = []
-    for device in devices:
-        tts = TextToSpeech(voice=voice, speed=settings.tts.speed, device=device)
-        tts.warmup()
+    tts = TextToSpeech(voice=voice, speed=settings.tts.speed)
+    tts.warmup()
 
-        runs = []
-        for text in TTS_TEXTS:
-            start = time.time()
-            first_chunk = 0.0
-            samples = 0
-            chunks = 0
-            for _, _, audio in tts.synthesize_stream(text):
-                chunks += 1
-                if first_chunk == 0.0:
-                    first_chunk = time.time() - start
-                samples += len(audio)
-            total = time.time() - start
-            audio_duration = samples / tts.sample_rate if samples else 0.0
-            runs.append({
-                "text": text,
-                "device": device,
-                "first_chunk": first_chunk,
-                "total": total,
-                "audio_duration": audio_duration,
-                "rtf": total / audio_duration if audio_duration else 0.0,
-                "chunks": chunks,
-            })
-
-        results.append({
-            "device": device,
-            "voice": voice,
-            "summary": {
-                "first_chunk": summarize([r["first_chunk"] for r in runs]),
-                "rtf": summarize([r["rtf"] for r in runs]),
-                "total": summarize([r["total"] for r in runs]),
-            },
-            "runs": runs,
+    runs = []
+    for text in TTS_TEXTS:
+        start = time.time()
+        first_chunk = 0.0
+        samples = 0
+        chunks = 0
+        for _, _, audio in tts.synthesize_stream(text):
+            chunks += 1
+            if first_chunk == 0.0:
+                first_chunk = time.time() - start
+            samples += len(audio)
+        total = time.time() - start
+        audio_duration = samples / tts.sample_rate if samples else 0.0
+        runs.append({
+            "text": text,
+            "first_chunk": first_chunk,
+            "total": total,
+            "audio_duration": audio_duration,
+            "rtf": total / audio_duration if audio_duration else 0.0,
+            "chunks": chunks,
         })
 
-        del tts
-        gc.collect()
+    results.append({
+        "voice": voice,
+        "summary": {
+            "first_chunk": summarize([r["first_chunk"] for r in runs]),
+            "rtf": summarize([r["rtf"] for r in runs]),
+            "total": summarize([r["total"] for r in runs]),
+        },
+        "runs": runs,
+    })
+
+    del tts
+    gc.collect()
 
     return results
 
@@ -274,7 +271,6 @@ def main() -> None:
         help="LLM model names to benchmark",
     )
     parser.add_argument("--max-tokens", type=int, default=settings.llm.max_tokens)
-    parser.add_argument("--tts-devices", nargs="*", default=["cpu", "mps"])
     parser.add_argument("--voice", default=settings.tts.voice)
     parser.add_argument("--output", default=None, help="Optional JSON output path")
     args = parser.parse_args()
@@ -300,7 +296,7 @@ def main() -> None:
     if run_llm:
         output["llm"] = benchmark_llm(args.models, args.max_tokens)
     if run_tts:
-        output["tts"] = benchmark_tts(args.tts_devices, args.voice)
+        output["tts"] = benchmark_tts(args.voice)
 
     out_path = Path(args.output) if args.output else Path("logs") / f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)

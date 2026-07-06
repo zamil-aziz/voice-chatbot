@@ -86,8 +86,7 @@ voice-chatbot/
 │   │   ├── capture.py      # Microphone input (16kHz)
 │   │   ├── playback.py     # Speaker output (24kHz)
 │   │   ├── vad.py          # Voice activity detection
-│   │   ├── vad_singleton.py # Shared VAD model instance
-│   │   └── post_processor.py # Audio post-processing
+│   │   └── vad_singleton.py # Shared VAD model instance
 │   ├── models/             # ML model wrappers
 │   │   ├── stt.py          # Whisper wrapper
 │   │   ├── llm.py          # Qwen/LLM wrapper
@@ -119,7 +118,7 @@ Edit `config/settings.py` to customize behavior. Key settings:
 | VAD | `threshold` | 0.5 | Speech detection sensitivity |
 | VAD | `min_silence_duration_ms` | 300 | Silence to end turn |
 | LLM | `model_name` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Default local chat model |
-| LLM | `max_tokens` | 96 | Max response length for voice mode |
+| LLM | `max_tokens` | 256 | Response length safety cap (persona keeps replies short) |
 | LLM | `temperature` | 0.7 | Response creativity |
 | LLM | `top_p` / `top_k` | `0.8` / `20` | Qwen3 non-thinking sampling defaults |
 | TTS | `voice` | `af_heart` | Default voice |

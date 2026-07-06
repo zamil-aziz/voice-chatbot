@@ -14,6 +14,9 @@ scipy>=1.14.0,<2.0.0
 # Voice Activity Detection
 silero-vad>=5.1
 
+# RAG embeddings for personal notes
+sentence-transformers>=5.2.0
+
 # TTS - Kokoro (realistic voices)
 kokoro>=0.9.4
 

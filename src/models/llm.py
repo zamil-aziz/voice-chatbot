@@ -117,6 +117,25 @@ Be natural and warm in your tone."""
             return self.tokenizer.apply_chat_template(messages, **template_kwargs)
 
     @staticmethod
+    def _build_user_content(user_message: str, context: Optional[List[str]]) -> str:
+        """Build the prompt content for a user turn, injecting RAG notes if any.
+
+        Only the returned prompt content carries the notes; conversation
+        history must store the original user message so the context window
+        never fills up with retrieval instructions.
+        """
+        if not context:
+            return user_message
+
+        context_text = "\n".join(context)
+        return f"""[Background notes about the person you're talking to that MAY be relevant:
+{context_text}
+
+Use them only if they genuinely help with this message; otherwise ignore them silently.]
+
+{user_message}"""
+
+    @staticmethod
     def clean_response_text(text: str) -> str:
         """Normalize model output for spoken playback and conversation history."""
         text = re.sub(r"<\s*think\b[^>]*>.*?</\s*think\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -156,20 +175,10 @@ Be natural and warm in your tone."""
         if self.model is None:
             raise RuntimeError("Model not loaded")
 
-        # Inject RAG context if provided
-        if context:
-            context_text = "\n".join(context)
-            user_message = f"""[You know these things about the person you're talking to:
-{context_text}
-
-Weave this knowledge into your response - mention specific details you know about them to show you remember and care. Make them feel known.]
-
-User: {user_message}"""
-
         start = time.time()
 
-        # Format the prompt
-        prompt = self._format_messages(user_message)
+        # Format the prompt (RAG notes go into the prompt only, not history)
+        prompt = self._format_messages(self._build_user_content(user_message, context))
 
         # Generate response using cached sampler
         response = self._generate_fn(
@@ -212,21 +221,11 @@ User: {user_message}"""
         if self.model is None:
             raise RuntimeError("Model not loaded")
 
-        # Inject RAG context if provided
-        if context:
-            context_text = "\n".join(context)
-            user_message = f"""[You know these things about the person you're talking to:
-{context_text}
-
-Weave this knowledge into your response - mention specific details you know about them to show you remember and care. Make them feel known.]
-
-User: {user_message}"""
-
         from mlx_lm import stream_generate
 
-        # Measure tokenization time
+        # Measure tokenization time (RAG notes go into the prompt only, not history)
         tokenize_start = time.time()
-        prompt = self._format_messages(user_message)
+        prompt = self._format_messages(self._build_user_content(user_message, context))
         tokenize_time = time.time() - tokenize_start
 
         full_response = ""

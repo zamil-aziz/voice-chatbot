@@ -55,6 +55,17 @@ Never say: "Certainly", "Absolutely", "I'd be happy to", "As an AI", "Is there a
 Do not use markdown, bullet points, code blocks, emojis, or stage directions."""
 
 
+class RAGSettings(BaseModel):
+    """Personal-notes retrieval settings."""
+    enabled: bool = True
+    notes_file: str = "./data/notes.txt"
+    embedder_model: str = "all-MiniLM-L6-v2"
+    n_results: int = 2
+    # MiniLM cosine scores below ~0.3 are mostly noise; anything retrieved
+    # under this threshold would inject irrelevant notes into the reply.
+    min_similarity: float = 0.30
+
+
 class VoiceBlendConfig(BaseModel):
     """Configuration for a single voice in a blend."""
     voice: str
@@ -127,6 +138,7 @@ class Settings(BaseModel):
     vad: VADSettings = Field(default_factory=VADSettings)
     stt: STTSettings = Field(default_factory=STTSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    rag: RAGSettings = Field(default_factory=RAGSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 

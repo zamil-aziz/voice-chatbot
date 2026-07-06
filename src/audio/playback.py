@@ -43,6 +43,10 @@ class AudioPlayer:
         self._stop_flag = threading.Event()
         self._playback_thread: Optional[threading.Thread] = None
         self._audio_queue: queue.Queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
+        # Ring buffer for gapless streaming playback
+        self._stream_buffer: collections.deque = collections.deque()
+        self._buffer_lock = threading.Lock()
+        self._stream_started = threading.Event()
 
     @property
     def is_playing(self) -> bool:
@@ -78,55 +82,25 @@ class AudioPlayer:
         finally:
             self.is_playing = False
 
-    def play_async(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> None:
-        """
-        Play audio in background (non-blocking).
-
-        Args:
-            audio: Audio samples as numpy array
-            sample_rate: Sample rate (uses default if None)
-        """
-        import sounddevice as sd
-
-        sr = sample_rate or self.sample_rate
-
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-
-        self.is_playing = True
-        sd.play(audio, sr, device=self.device)
-
-        # Start a thread to wait for completion
-        def wait_for_completion():
-            sd.wait()
-            self.is_playing = False
-
-        thread = threading.Thread(target=wait_for_completion, daemon=True)
-        thread.start()
-
     def stop(self) -> None:
-        """Stop any playing audio immediately (for barge-in)."""
+        """Stop any playing audio immediately and discard queued audio."""
         import sounddevice as sd
 
         self._stop_flag.set()
         sd.stop()
         self.is_playing = False
 
-        # Clear the ring buffer if it exists (for streaming mode)
-        if hasattr(self, '_stream_buffer') and hasattr(self, '_buffer_lock'):
-            with self._buffer_lock:
-                self._stream_buffer.clear()
+        with self._buffer_lock:
+            self._stream_buffer.clear()
 
     def start_streaming(self) -> None:
         """Start background streaming playback."""
         self._stop_flag.clear()
         self._audio_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
-        self.is_playing = True  # Mark as playing immediately for barge-in detection
+        self.is_playing = True  # Playing from the moment a response starts
 
-        # Ring buffer for gapless playback
-        self._stream_buffer: collections.deque = collections.deque()
-        self._buffer_lock = threading.Lock()
-        self._stream_started = threading.Event()
+        self._stream_buffer = collections.deque()
+        self._stream_started.clear()
 
         def stream_worker():
             import sounddevice as sd
@@ -226,18 +200,9 @@ class AudioPlayer:
         self._stop_flag.set()
         self.is_playing = False
 
-    def wait(self) -> None:
-        """Wait for current playback to complete."""
-        import sounddevice as sd
-
-        sd.wait()
-        self.is_playing = False
-
 
 # Quick test
 if __name__ == "__main__":
-    import time
-
     player = AudioPlayer(sample_rate=24000)
 
     # Generate a test tone
@@ -249,10 +214,10 @@ if __name__ == "__main__":
     console.print("[bold]Playing test tone (440Hz)...[/bold]")
     player.play(audio)
 
-    console.print("[bold]Playing async with early stop...[/bold]")
-    player.play_async(audio)
-    time.sleep(0.3)
-    player.stop()
-    console.print("[green]Stopped early![/green]")
+    console.print("[bold]Streaming the same tone in chunks...[/bold]")
+    player.start_streaming()
+    for start_idx in range(0, len(audio), 4800):
+        player.queue_audio(audio[start_idx:start_idx + 4800])
+    player.stop_streaming()
 
     console.print("[green]Playback test complete![/green]")

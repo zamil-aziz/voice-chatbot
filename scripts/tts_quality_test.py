@@ -13,7 +13,6 @@ Output:
     Listen and compare to find the best settings.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -27,8 +26,6 @@ from rich.table import Table
 
 from src.models.tts import TextToSpeech
 from src.processing.text_preprocessor import TextPreprocessor
-from src.audio.post_processor import AudioPostProcessor
-from config.settings import PostProcessingSettings
 
 console = Console()
 
@@ -46,64 +43,12 @@ TEST_PHRASES = [
     "The total comes to fifty-three dollars and twenty-seven cents.",
 ]
 
-# Test configurations: (name, voice, use_text_preprocessing, post_proc_settings)
+# Test configurations: (name, voice, use_text_preprocessing, description)
 CONFIGS = [
-    (
-        "01_bella_current",
-        "af_bella",
-        True,
-        PostProcessingSettings(),
-        "Current config (bella + full processing)"
-    ),
-    (
-        "02_heart_full",
-        "af_heart",
-        True,
-        PostProcessingSettings(),
-        "Heart voice + full processing"
-    ),
-    (
-        "03_heart_no_post",
-        "af_heart",
-        True,
-        PostProcessingSettings(enabled=False),
-        "Heart voice, no post-processing"
-    ),
-    (
-        "04_heart_raw",
-        "af_heart",
-        False,
-        PostProcessingSettings(enabled=False),
-        "Heart voice, raw (no text or audio processing)"
-    ),
-    (
-        "05_heart_dynamics_only",
-        "af_heart",
-        True,
-        PostProcessingSettings(warmth_enabled=False),
-        "Heart voice, dynamics only (no warmth)"
-    ),
-    (
-        "06_heart_warmth_only",
-        "af_heart",
-        True,
-        PostProcessingSettings(dynamics_enabled=False),
-        "Heart voice, warmth only (no dynamics)"
-    ),
-    (
-        "07_heart_light",
-        "af_heart",
-        True,
-        PostProcessingSettings(compression_ratio=1.5, warmth_boost_db=1.0),
-        "Heart voice, lighter processing (1.5 ratio, 1.0dB)"
-    ),
-    (
-        "08_nicole_full",
-        "af_nicole",
-        True,
-        PostProcessingSettings(),
-        "Nicole voice (soft/calm) + full processing"
-    ),
+    ("01_heart", "af_heart", True, "Heart voice (default) + text preprocessing"),
+    ("02_heart_raw", "af_heart", False, "Heart voice, raw text"),
+    ("03_bella", "af_bella", True, "Bella voice + text preprocessing"),
+    ("04_nicole", "af_nicole", True, "Nicole voice (soft/calm) + text preprocessing"),
 ]
 
 
@@ -125,7 +70,7 @@ def main():
     table.add_column("Config Name", style="green")
     table.add_column("Description")
 
-    for config_name, voice, use_text_proc, post_settings, description in CONFIGS:
+    for config_name, voice, use_text_proc, description in CONFIGS:
         table.add_row(config_name[:2], config_name[3:], description)
 
     console.print(table)
@@ -135,38 +80,31 @@ def main():
     loaded_tts = {}
     preprocessor = TextPreprocessor()
 
-    for config_name, voice, use_text_proc, post_settings, description in CONFIGS:
-        console.print(f"\n[bold yellow]=== {config_name} ===[/bold yellow]")
-        console.print(f"[dim]{description}[/dim]")
+    try:
+        for config_name, voice, use_text_proc, description in CONFIGS:
+            console.print(f"\n[bold yellow]=== {config_name} ===[/bold yellow]")
+            console.print(f"[dim]{description}[/dim]")
 
-        # Load TTS model if not already loaded for this voice
-        if voice not in loaded_tts:
-            console.print(f"[dim]Loading voice: {voice}...[/dim]")
-            loaded_tts[voice] = TextToSpeech(voice=voice)
+            # Load TTS model if not already loaded for this voice
+            if voice not in loaded_tts:
+                console.print(f"[dim]Loading voice: {voice}...[/dim]")
+                loaded_tts[voice] = TextToSpeech(voice=voice)
 
-        tts = loaded_tts[voice]
-        post_processor = AudioPostProcessor(config=post_settings)
+            tts = loaded_tts[voice]
 
-        for i, phrase in enumerate(TEST_PHRASES, 1):
-            # Apply text preprocessing if enabled
-            if use_text_proc:
-                processed_text = preprocessor.process(phrase)
-            else:
-                processed_text = phrase
+            for i, phrase in enumerate(TEST_PHRASES, 1):
+                processed_text = preprocessor.process(phrase) if use_text_proc else phrase
 
-            # Synthesize
-            audio, sr = tts.synthesize(processed_text)
+                audio, sr = tts.synthesize(processed_text)
 
-            # Apply post-processing if enabled
-            if post_settings.enabled:
-                audio = post_processor.process(audio)
+                filename = output_dir / f"{config_name}_phrase{i}.wav"
+                sf.write(str(filename), audio, sr)
 
-            # Save to file
-            filename = output_dir / f"{config_name}_phrase{i}.wav"
-            sf.write(str(filename), audio, sr)
-
-            duration = len(audio) / sr
-            console.print(f"  [green]Saved:[/green] {filename.name} ({duration:.2f}s)")
+                duration = len(audio) / sr
+                console.print(f"  [green]Saved:[/green] {filename.name} ({duration:.2f}s)")
+    finally:
+        for tts in loaded_tts.values():
+            tts.close()
 
     # Print listening guide
     console.print("\n" + "=" * 60)

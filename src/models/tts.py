@@ -14,17 +14,22 @@ import numpy as np
 
 from rich.console import Console
 
+from ..utils import resolve_torch_device
+
 console = Console()
 
 
-def _resolve_tts_device(preferred_device: str) -> str:
-    import torch
-
-    if preferred_device == "auto":
-        return "mps" if torch.backends.mps.is_available() else "cpu"
-    if preferred_device == "mps" and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+def _log_stream_stats(start: float, first_chunk_time, chunk_count: int, total_audio_samples: int, sample_rate: int) -> None:
+    """Log one line of streamed-synthesis timing detail."""
+    total_time = time.time() - start
+    audio_duration = total_audio_samples / sample_rate if total_audio_samples > 0 else 0
+    rtf = total_time / audio_duration if audio_duration > 0 else 0  # Real-time factor
+    first_chunk_time = first_chunk_time or 0
+    console.print(
+        f"[dim]TTS detail: first={first_chunk_time*1000:.0f}ms, "
+        f"{chunk_count} chunks, {audio_duration:.2f}s audio, "
+        f"RTF={rtf:.2f}x[/dim]"
+    )
 
 
 def _audio_to_numpy(audio_chunk):
@@ -95,12 +100,10 @@ def _tts_worker_main(
     """Run Kokoro in an isolated process to avoid native shutdown crashes."""
     request_id = None
     try:
-        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
         from kokoro import KPipeline
 
         lang_code = voice[0]
-        resolved_device = _resolve_tts_device(device)
+        resolved_device = resolve_torch_device(device)
         pipeline = KPipeline(lang_code=lang_code, device=resolved_device)
 
         blended_voice = None
@@ -193,7 +196,7 @@ class TextToSpeech:
 
     def __init__(
         self,
-        voice: str = "af_nicole",
+        voice: str = "af_heart",
         speed: float = 1.0,
         sample_rate: int = 24000,
         voice_blend: Optional[List[Tuple[str, float]]] = None,
@@ -271,23 +274,12 @@ class TextToSpeech:
         start = time.time()
 
         def do_load():
-            import os
-            # Enable MPS fallback BEFORE importing torch to avoid meta tensor issues
-            # This allows unsupported ops to fall back to CPU while keeping GPU for the rest
-            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            device = resolve_torch_device(self.device)
 
-            import torch
             from kokoro import KPipeline
 
             # 'a' = American English, 'b' = British English
             lang_code = self.voice[0]  # 'a' or 'b'
-
-            if self.device == "auto":
-                device = "mps" if torch.backends.mps.is_available() else "cpu"
-            elif self.device == "mps" and torch.backends.mps.is_available():
-                device = "mps"
-            else:
-                device = "cpu"
 
             try:
                 pipeline = KPipeline(lang_code=lang_code, device=device)
@@ -413,15 +405,7 @@ class TextToSpeech:
             total_audio_samples += len(audio_chunk)
             yield graphemes, phonemes, audio_chunk
 
-        # Log detailed TTS timing
-        total_time = time.time() - start
-        audio_duration = total_audio_samples / self.sample_rate if total_audio_samples > 0 else 0
-        rtf = total_time / audio_duration if audio_duration > 0 else 0  # Real-time factor
-        console.print(
-            f"[dim]TTS detail: first={first_chunk_time*1000:.0f}ms, "
-            f"{chunk_count} chunks, {audio_duration:.2f}s audio, "
-            f"RTF={rtf:.2f}x[/dim]"
-        )
+        _log_stream_stats(start, first_chunk_time, chunk_count, total_audio_samples, self.sample_rate)
 
     def _synthesize_stream_worker(self, text: str, speed: Optional[float] = None):
         """Request streamed audio from the isolated Kokoro worker."""
@@ -459,15 +443,7 @@ class TextToSpeech:
             total_audio_samples += len(audio_chunk)
             yield graphemes, phonemes, audio_chunk
 
-        total_time = time.time() - start
-        audio_duration = total_audio_samples / self.sample_rate if total_audio_samples > 0 else 0
-        rtf = total_time / audio_duration if audio_duration > 0 else 0
-        first_chunk_time = first_chunk_time or 0
-        console.print(
-            f"[dim]TTS detail: first={first_chunk_time*1000:.0f}ms, "
-            f"{chunk_count} chunks, {audio_duration:.2f}s audio, "
-            f"RTF={rtf:.2f}x[/dim]"
-        )
+        _log_stream_stats(start, first_chunk_time, chunk_count, total_audio_samples, self.sample_rate)
 
     def list_voices(self) -> dict[str, str]:
         """List available voices with descriptions."""

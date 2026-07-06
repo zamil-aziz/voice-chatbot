@@ -23,6 +23,7 @@ class VADSettings(BaseModel):
     min_silence_duration_ms: int = 300  # Silence before end-of-turn (reduced from 500ms for faster response)
     window_size_samples: int = 512  # Silero VAD window size
     device: Literal["auto", "cpu", "mps"] = "cpu"  # CPU is faster for tiny 512-sample chunks
+    use_onnx: bool = True  # onnxruntime beats the JIT torch model on 512-sample chunks
 
 
 class STTSettings(BaseModel):
@@ -96,20 +97,6 @@ class SpeedControlSettings(BaseModel):
     short_sentence_threshold: int = 5  # Words before considered "short"
 
 
-class PostProcessingSettings(BaseModel):
-    """Audio post-processing settings for naturalness."""
-    enabled: bool = False  # Disabled - raw Kokoro sounds better
-    # Pitch variation - causes robotic artifacts
-    pitch_variation_enabled: bool = False
-    pitch_variation_depth: float = 0.02
-    # Dynamics processing - disabled, reduces natural dynamics
-    dynamics_enabled: bool = False
-    compression_ratio: float = 2.0
-    # Warmth - disabled, muddies the audio
-    warmth_enabled: bool = False
-    warmth_boost_db: float = 2.0
-
-
 class TTSSettings(BaseModel):
     """Text-to-Speech settings."""
     voice: str = "af_heart"  # Highest quality voice [A grade]
@@ -121,7 +108,6 @@ class TTSSettings(BaseModel):
     # Processing stages for natural speech
     text_processing: TextProcessingSettings = Field(default_factory=TextProcessingSettings)
     speed_control: SpeedControlSettings = Field(default_factory=SpeedControlSettings)
-    post_processing: PostProcessingSettings = Field(default_factory=PostProcessingSettings)
 
 
 class LoggingSettings(BaseModel):

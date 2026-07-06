@@ -3,11 +3,13 @@ Shared Silero VAD singleton.
 Loads the model once and shares it across VoiceActivityDetector and SpeechToText.
 """
 
-import os
 import threading
-from typing import Optional, Tuple, Callable
+from typing import Tuple, Callable
 
 from rich.console import Console
+
+from config.settings import settings
+from ..utils import resolve_torch_device
 
 console = Console()
 
@@ -22,6 +24,10 @@ _is_loaded = False
 def get_vad_model(preferred_device: str = "cpu") -> Tuple[any, Callable, str]:
     """
     Get the shared Silero VAD model and utility functions.
+
+    Uses the silero-vad pip package (no torch.hub network fetch). With
+    settings.vad.use_onnx (default) the model runs on onnxruntime, which is
+    faster than the JIT torch model for the tiny per-chunk workload.
 
     Returns:
         Tuple of (model, get_speech_timestamps function, device string)
@@ -44,41 +50,26 @@ def get_vad_model(preferred_device: str = "cpu") -> Tuple[any, Callable, str]:
         console.print("[yellow]Loading Silero VAD model (shared)...[/yellow]")
 
         try:
-            # Enable MPS fallback for any unsupported ops
-            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            from silero_vad import load_silero_vad, get_speech_timestamps
 
-            import torch
-
-            if preferred_device == "auto":
-                device = "mps" if torch.backends.mps.is_available() else "cpu"
-            elif preferred_device == "mps" and torch.backends.mps.is_available():
-                device = "mps"
-            else:
+            use_onnx = settings.vad.use_onnx
+            if use_onnx:
+                # ONNX runs on CPU; callers keep tensors on CPU
+                model = load_silero_vad(onnx=True)
                 device = "cpu"
-
-            model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                force_reload=False,
-                onnx=False,
-            )
-
-            # Move model to GPU if available
-            model = model.to(device)
+            else:
+                device = resolve_torch_device(preferred_device)
+                model = load_silero_vad(onnx=False).to(device)
 
             _vad_model = model
-            _vad_utils = utils[0]  # get_speech_timestamps function
+            _vad_utils = get_speech_timestamps
             _vad_device = device
             _is_loaded = True
 
-            console.print(f"[green]Shared VAD model ready on {device.upper()}[/green]")
+            backend = "ONNX" if use_onnx else "TORCH"
+            console.print(f"[green]Shared VAD model ready ({backend}, {device.upper()})[/green]")
             return _vad_model, _vad_utils, _vad_device
 
         except Exception as e:
             console.print(f"[red]Failed to load Silero VAD: {e}[/red]")
             raise RuntimeError(f"Failed to load VAD model: {e}")
-
-
-def is_vad_loaded() -> bool:
-    """Check if VAD model is already loaded."""
-    return _is_loaded

@@ -19,7 +19,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector, AudioPostProcessor
+from ..audio import AudioCapture, AudioPlayer, VoiceActivityDetector
 from ..models import SpeechToText, LanguageModel, TextToSpeech, NotesRAG
 from ..processing import TextPreprocessor, DynamicSpeedController
 from config.settings import settings
@@ -168,10 +168,6 @@ class VoicePipeline:
         # Processing components for natural speech
         self.text_preprocessor = TextPreprocessor(settings.tts.text_processing)
         self.speed_controller = DynamicSpeedController(settings.tts.speed_control)
-        self.post_processor = AudioPostProcessor(
-            sample_rate=24000,
-            config=settings.tts.post_processing
-        )
 
         # State
         self.is_running = False
@@ -341,10 +337,6 @@ class VoicePipeline:
         for _, _, audio_chunk in self.tts.synthesize_stream(processed_sentence, speed=speed):
             if self._stop_event.is_set():
                 break
-
-            # Step 4: Apply audio post-processing for naturalness
-            if settings.tts.post_processing.enabled:
-                audio_chunk = self.post_processor.process(audio_chunk)
 
             chunks += 1
             samples += len(audio_chunk)

@@ -70,59 +70,6 @@ class SentenceSegmenter:
         return []
 
 
-class ThinkBlockStreamFilter:
-    """Suppress streamed text inside <think>...</think> blocks across chunks."""
-
-    THINK_TAG_RE = re.compile(r"</?\s*think\b[^>]*>", re.IGNORECASE)
-
-    def __init__(self):
-        self.in_think_block = False
-        self.pending_tag = ""
-
-    def add(self, text: str) -> str:
-        """Add streamed text and return only text that is safe to speak."""
-        output: list[str] = []
-
-        for char in text:
-            if self.pending_tag:
-                self.pending_tag += char
-                if self.THINK_TAG_RE.fullmatch(self.pending_tag):
-                    tag = self.pending_tag
-                    self.pending_tag = ""
-                    self.in_think_block = not tag.lstrip("<").startswith("/")
-                elif not self._could_be_think_tag(self.pending_tag):
-                    tag = self.pending_tag
-                    self.pending_tag = ""
-                    if not self.in_think_block:
-                        output.append(tag)
-                continue
-
-            if char == "<":
-                self.pending_tag = char
-                continue
-
-            if not self.in_think_block:
-                output.append(char)
-
-        return "".join(output)
-
-    def flush(self) -> str:
-        """Release any incomplete non-think tag that is safe to speak."""
-        if not self.pending_tag:
-            return ""
-
-        pending = self.pending_tag
-        self.pending_tag = ""
-        if self.in_think_block or self._could_be_think_tag(pending):
-            return ""
-        return pending
-
-    @staticmethod
-    def _could_be_think_tag(text: str) -> bool:
-        lowered = text.lower()
-        return "<think>".startswith(lowered) or "</think>".startswith(lowered)
-
-
 class VoicePipeline:
     """
     Complete voice conversation pipeline.
@@ -192,9 +139,9 @@ class VoicePipeline:
             self._is_processing = value
 
     def clear_conversation(self) -> None:
-        """Clear conversation history."""
+        """Clear conversation history (and the prompt cache built on it)."""
         if self.llm:
-            self.llm.conversation_history.clear()
+            self.llm.clear_history()
 
     def _load_models(self, skip_stt: bool = False) -> None:
         """Load all models in parallel if not already loaded.
@@ -369,7 +316,7 @@ class VoicePipeline:
         segmenter = SentenceSegmenter()
         segment_queue: queue.Queue = queue.Queue()
         sentinel = object()
-        response_tokens: list[str] = []
+        spoken_segments: list[str] = []
         tts_errors: list[BaseException] = []
         metrics_lock = threading.Lock()
         metrics: Dict[str, float] = {
@@ -419,7 +366,6 @@ class VoicePipeline:
         self.player.start_streaming()
         worker = threading.Thread(target=tts_worker, daemon=True)
         worker.start()
-        think_filter = ThinkBlockStreamFilter()
 
         def enqueue_spoken_segment(raw_segment: str) -> None:
             nonlocal first_segment_time
@@ -430,6 +376,7 @@ class VoicePipeline:
                 first_segment_time = time.time()
                 metrics["llm"] = first_segment_time - llm_start
                 console.print(f"[dim]LLM first chunk: {metrics['llm']:.2f}s[/dim]")
+            spoken_segments.append(segment)
             segment_queue.put(segment)
 
         try:
@@ -441,17 +388,9 @@ class VoicePipeline:
                     # the error after the worker join
                     break
 
-                response_tokens.append(token)
-                spoken_text = think_filter.add(token)
-                if not spoken_text:
-                    continue
-                for segment in segmenter.add(spoken_text):
+                for segment in segmenter.add(token):
                     enqueue_spoken_segment(segment)
 
-            remaining_text = think_filter.flush()
-            if remaining_text:
-                for segment in segmenter.add(remaining_text):
-                    enqueue_spoken_segment(segment)
             for segment in segmenter.flush():
                 enqueue_spoken_segment(segment)
         finally:
@@ -472,7 +411,10 @@ class VoicePipeline:
             metrics["tts"] = total_end - first_tts_start
         metrics.update({f"llm_{k}": v for k, v in self.llm.last_stream_stats.items()})
 
-        response = self.llm.clean_response_text("".join(response_tokens))
+        # Segments were cleaned as they were enqueued, so the joined text is
+        # already the spoken response - no second cleaning pass needed
+        response = " ".join(spoken_segments)
+        self.llm.commit_turn(text, response)
         return response, metrics
 
     def process_text(self, text: str) -> None:

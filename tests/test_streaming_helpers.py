@@ -3,7 +3,7 @@ import unittest
 from config.settings import TextProcessingSettings
 from src.models.llm import LanguageModel
 from src.models.tts import _create_blended_voice_tensor
-from src.pipeline.manager import SentenceSegmenter, ThinkBlockStreamFilter
+from src.pipeline.manager import SentenceSegmenter
 from src.processing.text_preprocessor import TextPreprocessor
 
 
@@ -49,26 +49,68 @@ class ResponseCleanupTests(unittest.TestCase):
         )
 
 
-class ThinkBlockStreamFilterTests(unittest.TestCase):
-    def test_suppresses_open_think_block_until_close_arrives(self):
-        stream_filter = ThinkBlockStreamFilter()
+class PromptCachePrefixTests(unittest.TestCase):
+    def test_common_prefix_lengths(self):
+        self.assertEqual(LanguageModel._common_prefix_len([], []), 0)
+        self.assertEqual(LanguageModel._common_prefix_len([1, 2, 3], [1, 2, 3]), 3)
+        self.assertEqual(LanguageModel._common_prefix_len([1, 2, 3], [1, 2, 4, 5]), 2)
+        self.assertEqual(LanguageModel._common_prefix_len([1, 2], [1, 2, 3]), 2)
+        self.assertEqual(LanguageModel._common_prefix_len([9, 2], [1, 2, 3]), 0)
 
-        self.assertEqual(stream_filter.add("<think>I should answer briefly."), "")
-        self.assertEqual(stream_filter.add("</think>Sure."), "Sure.")
-        self.assertEqual(stream_filter.flush(), "")
 
-    def test_handles_tags_split_across_chunks(self):
-        stream_filter = ThinkBlockStreamFilter()
+class CommitTurnTests(unittest.TestCase):
+    @staticmethod
+    def _bare_llm():
+        llm = object.__new__(LanguageModel)
+        llm.history_turns = 6
+        llm.conversation_history = []
+        return llm
 
-        self.assertEqual(stream_filter.add("<thi"), "")
-        self.assertEqual(stream_filter.add("nk>private"), "")
-        self.assertEqual(stream_filter.add("</thi"), "")
-        self.assertEqual(stream_filter.add("nk>Public."), "Public.")
+    def test_commit_turn_appends_user_and_assistant(self):
+        llm = self._bare_llm()
 
-    def test_preserves_non_think_angle_text(self):
-        stream_filter = ThinkBlockStreamFilter()
+        llm.commit_turn("Hi", "Hello there.")
 
-        self.assertEqual(stream_filter.add("Use < 5 items."), "Use < 5 items.")
+        self.assertEqual(
+            llm.conversation_history,
+            [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello there."},
+            ],
+        )
+
+    def test_interrupted_turn_is_marked(self):
+        llm = self._bare_llm()
+
+        llm.commit_turn("Count to thirty", "One, two, three,", interrupted=True)
+
+        self.assertEqual(
+            llm.conversation_history[-1]["content"],
+            "One, two, three, [interrupted by the user]",
+        )
+
+    def test_commit_turn_trims_history_in_batches(self):
+        llm = self._bare_llm()
+        llm.history_turns = 1
+
+        # Slack lets history exceed the cap so the prompt cache is rebuilt
+        # rarely; the trim fires once the slack is exhausted
+        for i in range(LanguageModel.HISTORY_TRIM_SLACK_TURNS + 1):
+            llm.commit_turn(f"user {i}", f"reply {i}")
+        self.assertEqual(
+            len(llm.conversation_history),
+            (LanguageModel.HISTORY_TRIM_SLACK_TURNS + 1) * 2,
+        )
+
+        llm.commit_turn("last user", "last reply")
+
+        self.assertEqual(
+            llm.conversation_history,
+            [
+                {"role": "user", "content": "last user"},
+                {"role": "assistant", "content": "last reply"},
+            ],
+        )
 
 
 class VoiceBlendTests(unittest.TestCase):

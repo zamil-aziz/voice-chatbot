@@ -129,6 +129,10 @@ class VoicePipeline:
         # Reusable executor for background tasks (RAG, etc.)
         self._executor = ThreadPoolExecutor(max_workers=2)
 
+        # Latest speculative RAG search fired from a partial transcript
+        # while the user is still speaking: (partial_text, future)
+        self._rag_prefetch: Optional[tuple] = None
+
     @property
     def is_processing(self) -> bool:
         """Thread-safe getter for is_processing flag."""
@@ -248,6 +252,7 @@ class VoicePipeline:
             batch_seconds=settings.stt.stream_batch_seconds,
             context_size=settings.stt.stream_context,
             depth=settings.stt.stream_depth,
+            on_partial=self._on_partial_transcript,
         )
 
     def _log_turn(self, user_text: str, assistant_response: str, timing: Dict[str, float]) -> None:
@@ -488,6 +493,20 @@ class VoicePipeline:
         finally:
             self.is_processing = False
 
+    def _on_partial_transcript(self, text: str) -> None:
+        """Prefetch RAG results while the user is still speaking.
+
+        Runs on the streaming STT worker thread; the search itself goes to
+        the executor so transcription is never blocked. MiniLM runs on CPU,
+        so this does not contend with STT/LLM/TTS on the GPU.
+        """
+        if not self.rag or len(text) < 12:
+            return
+        self._rag_prefetch = (
+            text,
+            self._executor.submit(self.rag.search, text, verbose=False),
+        )
+
     def _interrupt_current_turn(self) -> None:
         """Barge-in: halt playback and cancel the in-flight turn."""
         # Escaped opening bracket: rich would otherwise parse it as markup
@@ -551,7 +570,15 @@ class VoicePipeline:
                     if rag_start is not None:
                         rag_time = time.time() - rag_start
                 except Exception:
-                    pass  # Skip RAG if too slow
+                    # Too slow: fall back to the freshest prefetch computed
+                    # from a partial transcript while the user was speaking
+                    prefetch = self._rag_prefetch
+                    if prefetch is not None and prefetch[1].done():
+                        try:
+                            rag_context = prefetch[1].result()
+                            console.print("[dim]RAG: using prefetched results[/dim]")
+                        except Exception:
+                            pass
 
             response, timing = self._stream_response_to_speech(
                 text,
@@ -661,6 +688,7 @@ class VoicePipeline:
                     self.capture.start_recording()
                     # Start streaming transcription from the pre-buffer, which
                     # already holds this chunk plus the utterance onset
+                    self._rag_prefetch = None
                     self.stream_stt.start(list(self.capture.pre_buffer))
                 elif self.vad.is_speaking:
                     self.stream_stt.add(seq, chunk)

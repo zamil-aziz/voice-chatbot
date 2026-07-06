@@ -101,6 +101,7 @@ class NotesRAG:
         query: str,
         n_results: Optional[int] = None,
         min_similarity: Optional[float] = None,
+        verbose: bool = True,
     ) -> list[str]:
         """
         Search for notes relevant to the query.
@@ -110,6 +111,7 @@ class NotesRAG:
             n_results: Maximum number of results (default settings.rag.n_results)
             min_similarity: Minimum cosine similarity to include a result
                             (default settings.rag.min_similarity)
+            verbose: Log a hit count (silenced for speculative prefetches)
 
         Returns:
             Relevant note texts, best match first. Empty when nothing is
@@ -129,7 +131,7 @@ class NotesRAG:
         top_indices = np.argsort(similarities)[::-1][:n_results]
         results = [self.notes[i] for i in top_indices if similarities[i] >= min_similarity]
 
-        if results:
+        if results and verbose:
             console.print(f"[dim]RAG found {len(results)} relevant notes[/dim]")
 
         return results

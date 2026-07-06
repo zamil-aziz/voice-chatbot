@@ -73,16 +73,12 @@ class VoiceBlendConfig(BaseModel):
 
 
 class TextProcessingSettings(BaseModel):
-    """Text preprocessing settings for TTS prosody enhancement."""
+    """Text preprocessing settings for TTS pronunciation."""
     enabled: bool = True  # Enable deterministic TTS-safe text normalization
-    expand_interjections: bool = True  # Keep enabled - fixes TTS bug with rushed "Oh", "Hmm"
-    add_breathing_pauses: bool = False  # Disabled - degrades quality
-    add_emphasis_markers: bool = False  # Disabled - degrades quality
-    # TTS normalization settings (disabled - LLM handles formatting)
+    remove_fillers: bool = False  # Off: deleting "Oh"/"Hmm" flattens tone and breaks empathy pacing cues
     expand_abbreviations: bool = False  # Avoid unsafe rewrites like "in." -> "inches"
     replace_symbols: bool = True
-    format_currency: bool = False  # Disabled until comma-formatted amounts are safely normalized
-    format_phone_numbers: bool = True
+    format_phone_numbers: bool = True  # Only touches explicitly formatted numbers like (502) 345-6789
 
 
 class SpeedControlSettings(BaseModel):

@@ -122,8 +122,84 @@ class DefaultSettingsTests(unittest.TestCase):
         self.assertFalse(settings.expand_abbreviations)
         self.assertEqual(TextPreprocessor(settings).process("I'm in."), "I'm in.")
 
-    def test_currency_normalization_is_off_by_default(self):
-        self.assertFalse(TextProcessingSettings().format_currency)
+    def test_fillers_survive_by_default(self):
+        settings = TextProcessingSettings()
+
+        self.assertFalse(settings.remove_fillers)
+        self.assertEqual(
+            TextPreprocessor(settings).process("Hmm, let me think."),
+            "Hmm, let me think.",
+        )
+        self.assertEqual(
+            TextPreprocessor(settings).process("Oh no, that sounds hard."),
+            "Oh no, that sounds hard.",
+        )
+
+    def test_disabled_preprocessor_only_strips_emojis(self):
+        settings = TextProcessingSettings(enabled=False, remove_fillers=True)
+
+        self.assertEqual(
+            TextPreprocessor(settings).process("Oh, okay then."),
+            "Oh, okay then.",
+        )
+
+
+class FillerRemovalTests(unittest.TestCase):
+    def test_removes_sentence_initial_fillers_when_enabled(self):
+        settings = TextProcessingSettings(remove_fillers=True)
+        preprocessor = TextPreprocessor(settings)
+
+        self.assertEqual(preprocessor.process("Oh, okay."), "okay.")
+        self.assertEqual(
+            preprocessor.process("That's fine. Um, mostly."),
+            "That's fine. mostly.",
+        )
+
+    def test_keeps_meaningful_mid_sentence_words(self):
+        settings = TextProcessingSettings(remove_fillers=True)
+        preprocessor = TextPreprocessor(settings)
+
+        self.assertEqual(
+            preprocessor.process("Try things like, resting more."),
+            "Try things like, resting more.",
+        )
+
+
+class PhoneNumberTests(unittest.TestCase):
+    def test_formats_punctuated_phone_numbers(self):
+        preprocessor = TextPreprocessor(TextProcessingSettings())
+
+        self.assertEqual(
+            preprocessor.process("Call (502) 345-6789."),
+            "Call 5 0 2, 3 4 5, 6 7 8 9.",
+        )
+        self.assertEqual(
+            preprocessor.process("Call 502-345-6789."),
+            "Call 5 0 2, 3 4 5, 6 7 8 9.",
+        )
+
+    def test_leaves_bare_ten_digit_numbers_alone(self):
+        preprocessor = TextPreprocessor(TextProcessingSettings())
+
+        self.assertEqual(
+            preprocessor.process("Order 5023456789 shipped."),
+            "Order 5023456789 shipped.",
+        )
+
+
+class RagPromptInjectionTests(unittest.TestCase):
+    def test_no_context_returns_original_message(self):
+        self.assertEqual(
+            LanguageModel._build_user_content("Hi there", None),
+            "Hi there",
+        )
+
+    def test_context_wraps_but_preserves_message(self):
+        content = LanguageModel._build_user_content("Hi there", ["Dina likes tea."])
+
+        self.assertIn("Dina likes tea.", content)
+        self.assertIn("Hi there", content)
+        self.assertIn("ignore them silently", content)
 
 
 if __name__ == "__main__":

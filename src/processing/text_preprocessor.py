@@ -26,21 +26,13 @@ EMOJI_PATTERN = re.compile(
 )
 
 
-# Filler word removal - Kokoro TTS can't pronounce these naturally
-# (trained on clean studio speech, not conversational disfluencies)
-# Pre-compiled for performance (these run on every TTS call)
-FILLER_WORD_REMOVALS = [
-    (re.compile(r'\bOh+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Oh
-    (re.compile(r'\bHmm+\b[,.]?\.?\.?\s*', re.IGNORECASE), ''),  # Remove Hmm
-    (re.compile(r'\bAw+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Aw
-    (re.compile(r'\bAh+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Ah
-    (re.compile(r'\bUh+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Uh
-    (re.compile(r'\bUm+\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Um
-    (re.compile(r'\bHuh\b[,.]?\s*', re.IGNORECASE), ''),     # Remove Huh
-    (re.compile(r'\bOoh+\b[,.]?\s*', re.IGNORECASE), ''),    # Remove Ooh
-    (re.compile(r"\by'know\b[,.]?\s*", re.IGNORECASE), ''),  # Remove y'know
-    (re.compile(r'\blike,\s+', re.IGNORECASE), ''),          # Remove "like," (filler usage)
-]
+# Filler-word removal (opt-in). Only sentence-initial interjections are
+# removed: dropping fillers mid-sentence can change meaning, and words like
+# "like" carry meaning too often to strip safely at all.
+FILLER_WORD_RE = re.compile(
+    r"(^|[.!?]\s+)(?:Oh+|Hmm+|Aw+|Ah+|Uh+|Um+|Huh|Ooh+)\b[,.]?\s*",
+    re.IGNORECASE,
+)
 
 # Abbreviation expansions for natural TTS pronunciation
 ABBREVIATION_EXPANSIONS = [
@@ -76,16 +68,11 @@ SYMBOL_REPLACEMENTS = [
     (r'#(\d+)', r'number \1'),  # "#5" -> "number 5"
 ]
 
-# Number words for conversion
-NUMBER_WORDS = {
-    0: 'zero', 1: 'one', 2: 'two', 3: 'three', 4: 'four',
-    5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine',
-    10: 'ten', 11: 'eleven', 12: 'twelve', 13: 'thirteen',
-    14: 'fourteen', 15: 'fifteen', 16: 'sixteen', 17: 'seventeen',
-    18: 'eighteen', 19: 'nineteen', 20: 'twenty', 30: 'thirty',
-    40: 'forty', 50: 'fifty', 60: 'sixty', 70: 'seventy',
-    80: 'eighty', 90: 'ninety'
-}
+# Phone numbers must be explicitly formatted (parentheses or separators);
+# a bare 10-digit number is more often an ID, a year range, or a quantity.
+PHONE_NUMBER_RE = re.compile(
+    r"\(\d{3}\)\s?\d{3}[-.]\d{4}\b|\b\d{3}[-.]\d{3}[-.]\d{4}\b"
+)
 
 
 class TextPreprocessor:
@@ -117,105 +104,35 @@ class TextPreprocessor:
         # Strip emojis first - TTS will read them aloud otherwise
         text = EMOJI_PATTERN.sub('', text)
 
-        # Filler word removal runs independently of 'enabled' flag
-        # because TTS can't pronounce them naturally
-        if self.config.expand_interjections:
-            text = self._remove_filler_words(text)
-
         if not self.config.enabled:
             return text
 
-        # TTS normalization (run before prosody enhancements)
+        if self.config.remove_fillers:
+            text = self._remove_filler_words(text)
+
         if self.config.expand_abbreviations:
             text = self._expand_abbreviations(text)
 
         if self.config.replace_symbols:
             text = self._replace_symbols(text)
 
-        if self.config.format_currency:
-            text = self._format_currency(text)
-
         if self.config.format_phone_numbers:
             text = self._format_phone_numbers(text)
-
-        # Prosody enhancements
-        if self.config.add_breathing_pauses:
-            text = self._add_breathing_pauses(text)
-
-        if self.config.add_emphasis_markers:
-            text = self._add_emphasis_markers(text)
 
         return text
 
     def _remove_filler_words(self, text: str) -> str:
         """
-        Remove filler words that TTS can't pronounce naturally.
-
-        Kokoro TTS was trained on clean studio speech, not natural
-        conversations, so filler words like "Oh", "Hmm", "Um" sound
-        robotic and unnatural. Remove them entirely.
+        Remove sentence-initial filler interjections.
 
         Examples:
             "Oh, okay." -> "okay."
             "Hmm, let me think." -> "let me think."
-            "Um, like, y'know what I mean?" -> "what I mean?"
         """
-        for compiled_pattern, replacement in FILLER_WORD_REMOVALS:
-            text = compiled_pattern.sub(replacement, text)
+        text = FILLER_WORD_RE.sub(r'\1', text)
         # Clean up any double spaces or leading spaces from removals
         text = re.sub(r'  +', ' ', text)
         text = re.sub(r'^\s+', '', text)
-        return text
-
-    def _add_breathing_pauses(self, text: str) -> str:
-        """
-        Add ellipses for natural breathing pauses.
-
-        Inserts subtle pauses before conjunctions in longer clauses,
-        mimicking natural speech rhythm where speakers pause to breathe.
-
-        Examples:
-            "I went to the store and then I came home"
-            -> "I went to the store... and then I came home"
-        """
-        # Add subtle pause before 'and', 'but', 'so' when preceded by 15+ chars
-        # This creates natural breathing points in longer sentences
-        patterns = [
-            # Pause before conjunctions in long clauses
-            (r'(\w{12,})\s+(and|but|so|or)\s+', r'\1... \2 '),
-            # Pause after introductory clauses
-            (r'^(You know|I mean|The thing is|Actually)\s+', r'\1... '),
-        ]
-
-        for pattern, replacement in patterns:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-
-        return text
-
-    def _add_emphasis_markers(self, text: str) -> str:
-        """
-        Add punctuation to emphasize key transition words.
-
-        Adds commas after words like "Well", "Actually", "Honestly"
-        which naturally have a pause after them in speech.
-
-        Examples:
-            "Well I think that's a good idea"
-            -> "Well, I think that's a good idea"
-        """
-        # Words that naturally have a pause after them
-        emphasis_words = [
-            'Well', 'Actually', 'Honestly', 'Basically',
-            'Look', 'See', 'Right', 'Okay', 'So',
-            'Now', 'Anyway', 'Besides', 'Still',
-        ]
-
-        for word in emphasis_words:
-            # Add comma after word if not already followed by punctuation
-            pattern = rf'\b({word})\s+(?![,.\-!?])'
-            replacement = r'\1, '
-            text = re.sub(pattern, replacement, text)
-
         return text
 
     def _expand_abbreviations(self, text: str) -> str:
@@ -244,90 +161,20 @@ class TextPreprocessor:
         text = re.sub(r'  +', ' ', text)
         return text
 
-    def _format_currency(self, text: str) -> str:
-        """
-        Convert currency to spoken form.
-
-        Examples:
-            "$50" -> "fifty dollars"
-            "$1.50" -> "one dollar and fifty cents"
-        """
-        def dollars_and_cents(match):
-            dollars = int(match.group(1))
-            cents = int(match.group(2))
-            dollar_word = "dollar" if dollars == 1 else "dollars"
-            cent_word = "cent" if cents == 1 else "cents"
-            dollars_text = self._number_to_words(dollars)
-            cents_text = self._number_to_words(cents)
-            if cents == 0:
-                return f"{dollars_text} {dollar_word}"
-            return f"{dollars_text} {dollar_word} and {cents_text} {cent_word}"
-
-        def dollars_only(match):
-            dollars = int(match.group(1))
-            dollar_word = "dollar" if dollars == 1 else "dollars"
-            return f"{self._number_to_words(dollars)} {dollar_word}"
-
-        # Handle dollars with cents first (more specific pattern)
-        text = re.sub(r'\$(\d+)\.(\d{2})\b', dollars_and_cents, text)
-        # Handle whole dollars
-        text = re.sub(r'\$(\d+)\b', dollars_only, text)
-        return text
-
-    def _number_to_words(self, n: int) -> str:
-        """
-        Convert a number (0-999) to words.
-
-        Examples:
-            23 -> "twenty-three"
-            100 -> "one hundred"
-        """
-        if n in NUMBER_WORDS:
-            return NUMBER_WORDS[n]
-        elif n < 100:
-            tens = (n // 10) * 10
-            ones = n % 10
-            if ones == 0:
-                return NUMBER_WORDS[tens]
-            return f"{NUMBER_WORDS[tens]}-{NUMBER_WORDS[ones]}"
-        elif n < 1000:
-            hundreds = n // 100
-            remainder = n % 100
-            if remainder == 0:
-                return f"{NUMBER_WORDS[hundreds]} hundred"
-            return f"{NUMBER_WORDS[hundreds]} hundred {self._number_to_words(remainder)}"
-        else:
-            # For larger numbers, just return the digits
-            return str(n)
-
     def _format_phone_numbers(self, text: str) -> str:
         """
-        Format phone numbers for clear TTS pronunciation.
+        Format explicitly punctuated phone numbers for clear TTS pronunciation.
 
         Examples:
-            "5023456789" -> "5 0 2, 3 4 5, 6 7 8 9"
             "(502) 345-6789" -> "5 0 2, 3 4 5, 6 7 8 9"
+            "502-345-6789" -> "5 0 2, 3 4 5, 6 7 8 9"
+            "5023456789" is left alone (could be an ID or quantity)
         """
         def format_phone(match):
-            # Extract just the digits
             digits = re.sub(r'\D', '', match.group(0))
-            if len(digits) == 10:
-                # Format as area code, prefix, line
-                return f"{' '.join(digits[0:3])}, {' '.join(digits[3:6])}, {' '.join(digits[6:10])}"
-            elif len(digits) == 7:
-                # Local number without area code
-                return f"{' '.join(digits[0:3])}, {' '.join(digits[3:7])}"
-            # Return original if not a standard format
-            return match.group(0)
+            return f"{' '.join(digits[0:3])}, {' '.join(digits[3:6])}, {' '.join(digits[6:10])}"
 
-        # Match common phone number patterns
-        # 10 digits with optional formatting
-        text = re.sub(
-            r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
-            format_phone,
-            text
-        )
-        return text
+        return PHONE_NUMBER_RE.sub(format_phone, text)
 
 
 # Quick test
@@ -335,36 +182,18 @@ if __name__ == "__main__":
     preprocessor = TextPreprocessor()
 
     test_sentences = [
-        # Filler word removal tests
-        "Oh, okay.",
-        "Hmm, let me think about that.",
-        "Ah, I see what you mean.",
-        "Um, like, y'know what I mean?",
-        # Prosody tests
-        "Well I think that's a great idea.",
-        "I went to the store and then I came home and made dinner.",
-        "Actually I'm not sure about that.",
-        "The thing is I really want to help you understand this concept.",
-        "Okay so basically this is how it works.",
-        # Abbreviation tests
-        "Dr. Smith lives at 123 Main St.",
-        "Call Mr. Johnson at the office.",
-        "The package is 5 lb. and 12 oz.",
         # Symbol tests
         "That's $50 & change.",
         "You got 85% on the test!",
         "Email me at test@example.com",
         "Item #5 is on sale.",
-        # Currency tests
-        "$50",
-        "$1.50",
-        "$100",
-        "$23.99",
-        "That costs $5 or $10.",
-        # Phone number tests
-        "Call me at 5023456789.",
+        # Phone number tests (formatted numbers convert, bare digits don't)
         "My number is (502) 345-6789.",
         "Reach me at 502-345-6789.",
+        "Order number 5023456789 shipped.",
+        # Fillers survive by default (remove_fillers is off)
+        "Hmm, let me think about that.",
+        "Oh no, that sounds hard.",
     ]
 
     print("Text Preprocessor Demo")

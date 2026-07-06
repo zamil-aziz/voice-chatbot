@@ -1,5 +1,5 @@
 """
-Language Model module using Llama via MLX.
+Language Model module using MLX (Qwen family).
 Optimized for Apple Silicon with streaming support.
 """
 
@@ -23,12 +23,12 @@ class LanguageModel:
     def __init__(
         self,
         model_name: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit",
-        max_tokens: int = 96,
+        max_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.8,
         top_k: int = 20,
         min_p: float = 0.0,
-        history_turns: int = 4,
+        history_turns: int = 6,
         enable_thinking: bool = False,
         system_prompt: Optional[str] = None,
     ):

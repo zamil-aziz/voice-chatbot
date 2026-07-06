@@ -35,12 +35,14 @@ class STTSettings(BaseModel):
 class LLMSettings(BaseModel):
     """Language Model settings."""
     model_name: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-    max_tokens: int = 96
+    # Safety net, not a target: the persona keeps replies short, and a cap
+    # this size means detailed answers no longer truncate mid-thought.
+    max_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.8
     top_k: int = 20
     min_p: float = 0.0
-    history_turns: int = 4
+    history_turns: int = 6
     enable_thinking: bool = False
     system_prompt: str = """You're Maya, a warm, concise voice assistant.
 
@@ -50,6 +52,7 @@ Response rules:
 - Match the user's mood without forcing the same opener every time.
 - For emotions, acknowledge the feeling first, then offer one helpful thought or question.
 - For facts, answer directly and briefly.
+- If you truly don't know something, say so in one short sentence.
 
 Never say: "Certainly", "Absolutely", "I'd be happy to", "As an AI", "Is there anything else?"
 Do not use markdown, bullet points, code blocks, emojis, or stage directions."""

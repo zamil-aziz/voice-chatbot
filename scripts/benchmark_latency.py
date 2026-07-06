@@ -5,7 +5,8 @@ Benchmark local chatbot latency without using the microphone.
 Examples:
     python -m scripts.benchmark_latency --llm
     python -m scripts.benchmark_latency --tts
-    python -m scripts.benchmark_latency --all --models mlx-community/Qwen2.5-3B-Instruct-4bit
+    python -m scripts.benchmark_latency --stt
+    python -m scripts.benchmark_latency --all
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 import sys
 
@@ -40,6 +43,21 @@ TTS_TEXTS = [
     "Try frying the rice first, then stir in the eggs at the end.",
     "I can help with that, but I need one more detail.",
 ]
+
+# Fixture sentences for the STT benchmark. Keywords are checked against the
+# transcript so accuracy regressions show up alongside latency numbers.
+STT_FIXTURES = [
+    ("fox", "The quick brown fox jumps over the lazy dog.",
+     ["quick", "brown", "fox", "lazy", "dog"]),
+    ("meeting", "Please schedule a meeting for Tuesday at three thirty.",
+     ["schedule", "meeting", "tuesday"]),
+    ("pizza", "I would like to order a large pepperoni pizza with extra cheese.",
+     ["order", "pepperoni", "pizza", "cheese"]),
+    ("weather", "The weather in San Francisco is foggy in the morning.",
+     ["weather", "francisco", "foggy", "morning"]),
+]
+
+FIXTURES_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
 
 
 def summarize(values: list[float]) -> dict[str, float]:
@@ -163,19 +181,96 @@ def benchmark_tts(devices: list[str], voice: str) -> list[dict[str, Any]]:
     return results
 
 
+def ensure_stt_fixtures() -> list[tuple[Path, str, list[str]]]:
+    """Synthesize fixture wavs once (24kHz TTS resampled to 16kHz) and reuse them."""
+    import scipy.io.wavfile as wavfile
+    import scipy.signal
+
+    FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+    fixtures = []
+    tts = None
+    try:
+        for name, text, keywords in STT_FIXTURES:
+            path = FIXTURES_DIR / f"stt_{name}.wav"
+            if not path.exists():
+                if tts is None:
+                    tts = TextToSpeech(voice=settings.tts.voice, speed=settings.tts.speed)
+                    tts.warmup()
+                chunks = [audio for _, _, audio in tts.synthesize_stream(text)]
+                audio_24k = np.concatenate(chunks)
+                audio_16k = scipy.signal.resample_poly(audio_24k, 2, 3).astype(np.float32)
+                wavfile.write(path, 16000, audio_16k)
+                print(f"Created fixture {path}")
+            fixtures.append((path, text, keywords))
+    finally:
+        if tts is not None and hasattr(tts, "close"):
+            tts.close()
+    return fixtures
+
+
+def load_fixture_audio(path: Path) -> np.ndarray:
+    import scipy.io.wavfile as wavfile
+
+    rate, audio = wavfile.read(path)
+    if audio.dtype == np.int16:
+        audio = audio.astype(np.float32) / 32768.0
+    elif audio.dtype != np.float32:
+        audio = audio.astype(np.float32)
+    if rate != 16000:
+        raise ValueError(f"Fixture {path} has sample rate {rate}, expected 16000")
+    return audio
+
+
+def benchmark_stt() -> list[dict[str, Any]]:
+    from src.models.stt import SpeechToText
+
+    fixtures = ensure_stt_fixtures()
+    stt = SpeechToText()
+    stt.warmup()
+
+    runs = []
+    for path, text, keywords in fixtures:
+        audio = load_fixture_audio(path)
+        start = time.time()
+        transcript = stt.transcribe(audio, skip_vad_trim=True)
+        elapsed = time.time() - start
+        lowered = transcript.lower()
+        hits = [kw for kw in keywords if kw in lowered]
+        runs.append({
+            "fixture": path.name,
+            "reference": text,
+            "transcript": transcript,
+            "time": elapsed,
+            "audio_duration": len(audio) / 16000.0,
+            "keyword_recall": len(hits) / len(keywords),
+            "missing_keywords": [kw for kw in keywords if kw not in hits],
+        })
+
+    results = [{
+        "model": stt.model_name,
+        "summary": {
+            "time": summarize([r["time"] for r in runs]),
+            "keyword_recall": summarize([r["keyword_recall"] for r in runs]),
+        },
+        "runs": runs,
+    }]
+
+    del stt
+    gc.collect()
+    clear_mlx_cache()
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark local voice chatbot latency")
     parser.add_argument("--llm", action="store_true", help="Run LLM benchmarks")
     parser.add_argument("--tts", action="store_true", help="Run TTS benchmarks")
+    parser.add_argument("--stt", action="store_true", help="Run STT benchmarks")
     parser.add_argument("--all", action="store_true", help="Run all benchmarks")
     parser.add_argument(
         "--models",
         nargs="*",
-        default=[
-            settings.llm.model_name,
-            "mlx-community/Qwen2.5-3B-Instruct-4bit",
-            "mlx-community/Qwen2.5-7B-Instruct-4bit",
-        ],
+        default=[settings.llm.model_name],
         help="LLM model names to benchmark",
     )
     parser.add_argument("--max-tokens", type=int, default=settings.llm.max_tokens)
@@ -184,8 +279,9 @@ def main() -> None:
     parser.add_argument("--output", default=None, help="Optional JSON output path")
     args = parser.parse_args()
 
-    run_llm = args.all or args.llm or not (args.llm or args.tts)
+    run_llm = args.all or args.llm or not (args.llm or args.tts or args.stt)
     run_tts = args.all or args.tts
+    run_stt = args.all or args.stt
 
     output: dict[str, Any] = {
         "timestamp": datetime.now().isoformat(),
@@ -199,6 +295,8 @@ def main() -> None:
         },
     }
 
+    if run_stt:
+        output["stt"] = benchmark_stt()
     if run_llm:
         output["llm"] = benchmark_llm(args.models, args.max_tokens)
     if run_tts:

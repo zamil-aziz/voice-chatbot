@@ -9,27 +9,29 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 - **Privacy First**: Your conversations never leave your machine
 - **Natural Voice**: 28 high-quality voices with Kokoro TTS
 - **Fast**: Optimized for Apple Silicon with MLX
-- **Streaming Pipeline**: LLM generation and TTS synthesis overlap for lower latency
+- **Streaming Pipeline**: transcription runs while you speak, and LLM generation and TTS synthesis overlap for lower latency
+- **Interruptible**: barge in while the assistant is speaking to start a new turn
 - **Personal Context**: RAG-powered retrieval from your notes
-- **Apple Silicon Ready**: MLX acceleration for STT/LLM with isolated Kokoro TTS
+- **Apple Silicon Ready**: MLX acceleration for STT, LLM, and TTS in a single process
 
 ## Architecture
 
 ```
-┌─────┐    ┌─────┐    ┌─────┐    ┌─────┐    ┌─────┐    ┌─────────┐
-│ Mic │ -> │ VAD │ -> │ STT │ -> │ LLM │ -> │ TTS │ -> │ Speaker │
-└─────┘    └─────┘    └─────┘    └──┬──┘    └──┬──┘    └─────────┘
-                                    │          │
-                              [streaming: TTS starts per-sentence]
+┌─────┐    ┌─────┐    ┌───────────────┐    ┌─────┐    ┌─────┐    ┌─────────┐
+│ Mic │ -> │ VAD │ -> │ streaming STT │ -> │ LLM │ -> │ TTS │ -> │ Speaker │
+└─────┘    └──┬──┘    └───────────────┘    └──┬──┘    └──┬──┘    └────┬────┘
+              │     [transcribes while you speak]        │            │
+              │                     [streaming: TTS starts per-sentence]
+              └<─────────────── [barge-in: speech interrupts playback] ┘
 ```
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|------------|
-| Speech-to-Text | Whisper Large-v3-turbo (via MLX) |
-| Language Model | Qwen 3 4B Instruct 4-bit (via MLX) |
-| Text-to-Speech | Kokoro (28 voices) |
+| Speech-to-Text | Parakeet TDT 0.6B v3 (via MLX, streaming) |
+| Language Model | Qwen3.5 4B 4-bit (via MLX, cross-turn prompt cache) |
+| Text-to-Speech | Kokoro 82M on MLX (28 voices, in-process) |
 | Voice Detection | Silero VAD |
 | Context Retrieval | Sentence-Transformers (all-MiniLM-L6-v2) |
 
@@ -88,9 +90,9 @@ voice-chatbot/
 │   │   ├── vad.py          # Voice activity detection
 │   │   └── vad_singleton.py # Shared VAD model instance
 │   ├── models/             # ML model wrappers
-│   │   ├── stt.py          # Whisper wrapper
-│   │   ├── llm.py          # Qwen/LLM wrapper
-│   │   ├── tts.py          # Kokoro wrapper
+│   │   ├── stt.py          # Parakeet wrapper (batch + streaming)
+│   │   ├── llm.py          # Qwen/LLM wrapper (prompt cache)
+│   │   ├── tts.py          # Kokoro-on-MLX wrapper
 │   │   └── rag.py          # RAG retrieval (sentence-transformers)
 │   ├── processing/         # Text and speed processing
 │   │   ├── text_preprocessor.py  # Prosody enhancement for TTS
@@ -117,14 +119,15 @@ Edit `config/settings.py` to customize behavior. Key settings:
 | Audio | `sample_rate` | 16000 | Capture rate (Hz) |
 | VAD | `threshold` | 0.5 | Speech detection sensitivity |
 | VAD | `min_silence_duration_ms` | 300 | Silence to end turn |
-| LLM | `model_name` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Default local chat model |
+| STT | `model_name` | `mlx-community/parakeet-tdt-0.6b-v3` | Streaming speech recognition |
+| LLM | `model_name` | `mlx-community/Qwen3.5-4B-MLX-4bit` | Default local chat model |
 | LLM | `max_tokens` | 256 | Response length safety cap (persona keeps replies short) |
 | LLM | `temperature` | 0.7 | Response creativity |
 | LLM | `top_p` / `top_k` | `0.8` / `20` | Qwen3 non-thinking sampling defaults |
 | TTS | `voice` | `af_heart` | Default voice |
 | TTS | `speed` | 1.0 | Speech rate multiplier |
-| TTS | `device` | `cpu` | Kokoro device; CPU avoids GPU contention with MLX |
-| TTS | `isolated_process` | `true` | Runs Kokoro outside the main process to avoid native shutdown crashes |
+| Barge-in | `enabled` | `true` | Speak over the assistant to interrupt it |
+| Barge-in | `playback_vad_threshold` | 0.75 | VAD strictness while audio plays (echo rejection) |
 
 ## Available Voices
 
@@ -167,16 +170,16 @@ Kokoro provides 28 English voices with quality ratings:
 
 | Metric | Typical Value |
 |--------|---------------|
-| First audio output | Target: <=2 seconds p50 after speech end |
-| Memory usage | 8-12 GB RAM |
-| Disk space (models) | ~15 GB |
-| Models load time | ~30-60 seconds (first run downloads) |
+| First audio output | ~1-1.5 seconds after speech end |
+| Memory usage | 6-9 GB RAM |
+| Disk space (models) | ~5 GB |
+| Models load time | ~10 seconds warm (first run downloads) |
 
 ## Troubleshooting
 
 ### "No module named 'mlx'"
 ```bash
-pip install mlx mlx-lm mlx-whisper
+pip install mlx mlx-lm parakeet-mlx mlx-audio
 ```
 
 ### Audio device issues
@@ -185,7 +188,7 @@ python -c "import sounddevice; print(sounddevice.query_devices())"
 ```
 
 ### Model download issues
-Models are downloaded automatically on first run. Ensure you have ~15GB free disk space.
+Models are downloaded automatically on first run. Ensure you have ~5GB free disk space.
 
 ## License
 

@@ -6,9 +6,9 @@ Voice Chatbot - Local AI Voice Assistant
 A fully local, privacy-respecting voice assistant running on Apple Silicon.
 
 Components:
-- STT: Whisper (via MLX)
-- LLM: Qwen 3 4B Instruct (via MLX)
-- TTS: Kokoro
+- STT: Parakeet TDT 0.6B v3 (via MLX, streaming)
+- LLM: Qwen3.5 4B (via MLX, cross-turn prompt cache)
+- TTS: Kokoro 82M (via MLX)
 - VAD: Silero
 
 Usage:

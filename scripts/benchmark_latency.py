@@ -304,6 +304,12 @@ def main() -> None:
     print(json.dumps(output, indent=2))
     print(f"\nSaved benchmark results to {out_path}")
 
+    # Loading STT+LLM+TTS stacks in one process can SIGBUS in native library
+    # teardown at interpreter exit (results are already saved by this point);
+    # skip the teardown entirely
+    import os
+    os._exit(0)
+
 
 if __name__ == "__main__":
     main()

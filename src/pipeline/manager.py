@@ -132,7 +132,6 @@ class VoicePipeline:
     - Speech-to-text transcription
     - LLM response generation
     - Text-to-speech synthesis
-    - Barge-in (interruption) handling
     """
 
     def __init__(
@@ -618,8 +617,8 @@ class VoicePipeline:
 
         try:
             self.capture.start()
-            timestamp_ms = 0
-            chunk_duration_ms = (self.capture.chunk_size / self.capture.sample_rate) * 1000
+            loop_start = time.monotonic()
+            was_playing = False
 
             while not self._stop_event.is_set():
                 # Get audio chunk
@@ -627,13 +626,23 @@ class VoicePipeline:
                 if chunk is None:
                     continue
 
-                timestamp_ms += chunk_duration_ms
+                # Wall-clock timestamps so VAD durations stay correct even
+                # when chunks are dropped under load.
+                timestamp_ms = (time.monotonic() - loop_start) * 1000.0
 
-                # Skip processing while audio is playing (barge-in disabled)
-                # Note: Barge-in was causing false interruptions when using speakers
-                # (microphone picking up TTS audio). Re-enable if using headphones.
+                # Skip VAD while audio is playing: with speakers the
+                # microphone re-hears the TTS output and would false-trigger.
                 if self.player.is_playing:
+                    was_playing = True
                     continue
+
+                if was_playing:
+                    # Playback just finished; drop any speech state and
+                    # partial recording built up from TTS bleed.
+                    was_playing = False
+                    self.vad.reset()
+                    if self.capture.recording:
+                        self.capture.stop_recording()
 
                 # Process VAD
                 is_speech, speech_started, speech_ended = self.vad.process(
@@ -643,9 +652,13 @@ class VoicePipeline:
                 if speech_started:
                     self.capture.start_recording()
 
-                if speech_ended and not self.is_processing:
+                if speech_ended:
+                    # Always stop recording so audio can't accumulate
+                    # unbounded across skipped turns.
                     audio = self.capture.stop_recording()
-                    if len(audio) > 0:
+                    if self.is_processing:
+                        console.print("[dim]Still responding, ignored input[/dim]")
+                    elif len(audio) > 0:
                         # Clean up finished threads
                         self._active_threads = [t for t in self._active_threads if t.is_alive()]
 

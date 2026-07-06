@@ -117,6 +117,16 @@ class TTSSettings(BaseModel):
     speed_control: SpeedControlSettings = Field(default_factory=SpeedControlSettings)
 
 
+class BargeInSettings(BaseModel):
+    """Interrupting the assistant while it speaks."""
+    enabled: bool = True
+    # Stricter VAD profile while TTS audio is playing: without echo
+    # cancellation the microphone re-hears the speaker, so only clearly
+    # dominant speech should count as an interruption
+    playback_vad_threshold: float = 0.75
+    playback_min_speech_ms: int = 400
+
+
 class LoggingSettings(BaseModel):
     """Conversation logging settings."""
     enabled: bool = True  # Enable to evaluate response quality
@@ -132,6 +142,7 @@ class Settings(BaseModel):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     rag: RAGSettings = Field(default_factory=RAGSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
+    barge_in: BargeInSettings = Field(default_factory=BargeInSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     # Model loading settings

@@ -122,6 +122,8 @@ class VoicePipeline:
         self._is_processing = False
         self._processing_lock = threading.Lock()
         self._stop_event = threading.Event()
+        # Set when the user barges in: cancels generation and TTS mid-turn
+        self._cancel_event = threading.Event()
         self._active_threads: list = []
 
         # Reusable executor for background tasks (RAG, etc.)
@@ -289,7 +291,7 @@ class VoicePipeline:
         samples = 0
         marked_first_audio = False
         for _, _, audio_chunk in self.tts.synthesize_stream(processed_sentence, speed=speed):
-            if self._stop_event.is_set():
+            if self._stop_event.is_set() or self._cancel_event.is_set():
                 break
 
             chunks += 1
@@ -353,11 +355,16 @@ class VoicePipeline:
                 if item is sentinel:
                     segment_queue.task_done()
                     break
+                if self._cancel_event.is_set():
+                    # Barge-in: drain remaining segments without speaking them
+                    segment_queue.task_done()
+                    continue
 
                 sentence = item
                 try:
                     if first_tts_start is None:
                         first_tts_start = time.time()
+                    spoken_segments.append(sentence)
                     tts_stats = self._synthesize_sentence(sentence, on_first_audio=mark_first_audio)
                     with metrics_lock:
                         metrics["tts_synthesis"] += tts_stats["tts_synthesis"]
@@ -382,12 +389,11 @@ class VoicePipeline:
                 first_segment_time = time.time()
                 metrics["llm"] = first_segment_time - llm_start
                 console.print(f"[dim]LLM first chunk: {metrics['llm']:.2f}s[/dim]")
-            spoken_segments.append(segment)
             segment_queue.put(segment)
 
         try:
             for token in self.llm.generate_stream(text, context=rag_context):
-                if self._stop_event.is_set():
+                if self._stop_event.is_set() or self._cancel_event.is_set():
                     break
                 if tts_errors:
                     # TTS failed: cancel generation now instead of discovering
@@ -397,15 +403,20 @@ class VoicePipeline:
                 for segment in segmenter.add(token):
                     enqueue_spoken_segment(segment)
 
-            for segment in segmenter.flush():
-                enqueue_spoken_segment(segment)
+            if not self._cancel_event.is_set():
+                for segment in segmenter.flush():
+                    enqueue_spoken_segment(segment)
         finally:
             metrics["llm_total"] = time.time() - llm_start
             segment_queue.put(sentinel)
             worker.join(timeout=60.0)
 
             playback_start = time.time()
-            self.player.stop_streaming()
+            if self._cancel_event.is_set():
+                # Barge-in already halted the player; don't wait for a drain
+                self.player.stop()
+            else:
+                self.player.stop_streaming()
             metrics["playback_drain"] = time.time() - playback_start
 
         if tts_errors:
@@ -418,9 +429,15 @@ class VoicePipeline:
         metrics.update({f"llm_{k}": v for k, v in self.llm.last_stream_stats.items()})
 
         # Segments were cleaned as they were enqueued, so the joined text is
-        # already the spoken response - no second cleaning pass needed
+        # already the spoken response - no second cleaning pass needed.
+        # On barge-in only what was actually sent to TTS is recorded, and the
+        # interruption marker keeps the model aware the reply was cut short.
+        # The conversation prompt cache stays consistent automatically: the
+        # next turn's prompt diverges at this assistant message and the cache
+        # holds only earlier history.
         response = " ".join(spoken_segments)
-        self.llm.commit_turn(text, response)
+        interrupted = self._cancel_event.is_set() and not self._stop_event.is_set()
+        self.llm.commit_turn(text, response, interrupted=interrupted)
         return response, metrics
 
     def process_text(self, text: str) -> None:
@@ -471,6 +488,17 @@ class VoicePipeline:
         finally:
             self.is_processing = False
 
+    def _interrupt_current_turn(self) -> None:
+        """Barge-in: halt playback and cancel the in-flight turn."""
+        # Escaped opening bracket: rich would otherwise parse it as markup
+        console.print("[yellow]\\[interrupted][/yellow]")
+        self._cancel_event.set()
+        self.player.stop()
+        for thread in self._active_threads:
+            if thread.is_alive():
+                thread.join(timeout=3.0)
+        self._active_threads = [t for t in self._active_threads if t.is_alive()]
+
     def process_utterance(self, transcript_future) -> None:
         """
         Process a complete user utterance with streaming LLM→TTS.
@@ -480,6 +508,7 @@ class VoicePipeline:
                 (transcription ran while the user was speaking)
         """
         self.is_processing = True
+        self._cancel_event.clear()
 
         try:
             # Step 1: Collect the streamed transcript (usually already done)
@@ -494,6 +523,11 @@ class VoicePipeline:
 
             if not text.strip():
                 console.print("[dim]No speech detected[/dim]")
+                return
+
+            if self._cancel_event.is_set():
+                # Barged in while the transcript was finalizing; the new
+                # utterance supersedes this turn
                 return
 
             console.print(f"[bold white]You:[/bold white] {text}")
@@ -580,20 +614,41 @@ class VoicePipeline:
                 # when chunks are dropped under load.
                 timestamp_ms = (time.monotonic() - loop_start) * 1000.0
 
-                # Skip VAD while audio is playing: with speakers the
-                # microphone re-hears the TTS output and would false-trigger.
-                if self.player.is_playing:
-                    was_playing = True
-                    continue
-
-                if was_playing:
-                    # Playback just finished; drop any speech state and
-                    # partial recording built up from TTS bleed.
-                    was_playing = False
-                    self.vad.reset()
-                    if self.capture.recording:
-                        self.capture.stop_recording()
-                        self.stream_stt.abort()
+                playing = self.player.is_playing
+                if not settings.barge_in.enabled:
+                    # Half-duplex fallback: skip VAD while audio is playing so
+                    # the microphone can't re-hear the TTS output.
+                    if playing:
+                        was_playing = True
+                        continue
+                    if was_playing:
+                        # Playback just finished; drop any speech state and
+                        # partial recording built up from TTS bleed.
+                        was_playing = False
+                        self.vad.reset()
+                        if self.capture.recording:
+                            self.capture.stop_recording()
+                            self.stream_stt.abort()
+                elif playing != was_playing:
+                    # Barge-in mode: keep listening during playback, but with
+                    # a stricter VAD profile since the microphone re-hears the
+                    # speaker (no acoustic echo cancellation available).
+                    was_playing = playing
+                    if playing:
+                        self.vad.reset()
+                        self.vad.set_profile(
+                            settings.barge_in.playback_vad_threshold,
+                            settings.barge_in.playback_min_speech_ms,
+                        )
+                    else:
+                        self.vad.set_profile(
+                            settings.vad.threshold,
+                            settings.vad.min_speech_duration_ms,
+                        )
+                        # Keep VAD state if the profile switch was caused by a
+                        # barge-in mid-utterance; otherwise start clean
+                        if not self.vad.is_speaking:
+                            self.vad.reset()
 
                 # Process VAD
                 is_speech, speech_started, speech_ended = self.vad.process(
@@ -601,6 +656,8 @@ class VoicePipeline:
                 )
 
                 if speech_started:
+                    if self.is_processing or self.player.is_playing:
+                        self._interrupt_current_turn()
                     self.capture.start_recording()
                     # Start streaming transcription from the pre-buffer, which
                     # already holds this chunk plus the utterance onset

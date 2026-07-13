@@ -32,7 +32,7 @@ A fully local, privacy-respecting AI voice assistant running on Apple Silicon (M
 | Speech-to-Text | Parakeet TDT 0.6B v3 (via MLX, streaming) |
 | Language Model | Qwen3.5 4B 4-bit (via MLX, cross-turn prompt cache) |
 | Text-to-Speech | Kokoro 82M on MLX (28 voices, in-process) |
-| Voice Detection | Silero VAD |
+| Voice Detection | Silero VAD (ONNX Runtime backend) |
 | Context Retrieval | Sentence-Transformers (all-MiniLM-L6-v2) |
 
 ## Requirements
@@ -60,7 +60,8 @@ pip install -r requirements.txt
 
 ### Run the Voice Assistant
 ```bash
-python -m src.main
+python -m src.main            # Voice mode (speak to the assistant)
+python -m src.main --text     # Text input mode (type instead of speak; skips STT)
 ```
 
 ### Test Individual Components
@@ -74,6 +75,7 @@ python -m src.main --test-all   # Test all components
 
 ### Benchmark Latency
 ```bash
+python -m scripts.benchmark_latency --stt
 python -m scripts.benchmark_latency --llm
 python -m scripts.benchmark_latency --tts
 python -m scripts.benchmark_latency --all
@@ -103,8 +105,9 @@ voice-chatbot/
 ├── config/
 │   └── settings.py         # Configuration
 ├── scripts/                # Evaluation and testing tools
-│   ├── tts_quality_test.py
-│   └── eval_responses.py
+│   ├── benchmark_latency.py     # STT/LLM/TTS latency benchmarks
+│   ├── tts_quality_test.py      # TTS A/B quality comparison
+│   └── eval_responses.py        # LLM response-quality evaluation
 ├── data/                   # Personal notes for RAG
 ├── requirements.txt
 └── README.md
@@ -128,6 +131,7 @@ Edit `config/settings.py` to customize behavior. Key settings:
 | TTS | `speed` | 1.0 | Speech rate multiplier |
 | Barge-in | `enabled` | `true` | Speak over the assistant to interrupt it |
 | Barge-in | `playback_vad_threshold` | 0.75 | VAD strictness while audio plays (echo rejection) |
+| Logging | `enabled` | `true` | Save conversation transcripts to `logs/` (stays on-device) |
 
 ## Available Voices
 
@@ -155,7 +159,7 @@ Kokoro provides 28 English voices with quality ratings:
 | Voice | Grade | Description |
 |-------|-------|-------------|
 | `bf_emma` | B- | Elegant, refined |
-| `bf_isabella` | C | Professional |
+| `bf_isabella` | C | Warm, articulate |
 | `bf_alice` `bf_lily` | C-D | Additional options |
 
 **British Male (4 voices)**
